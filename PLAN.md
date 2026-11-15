@@ -15,7 +15,7 @@ socket. posockets fills that gap, small and portable:
 
 - **TCP**, IPv4 and IPv6: listen, accept, connect, read, write,
   shutdown, close; local and peer addresses as text.
-- **Names**: `getaddrinfo` for host and service, so `localhost`,
+- **Names**: `getaddrinfo` for the host, so `localhost`,
   `example.org` and `::1` all work.
 - **Unix-domain stream sockets** and `socketpair`.
 - **Two ways to wait**: blocking calls for simple programs, and
@@ -78,8 +78,10 @@ C part is already the thin layer, small and private, because the
 sockets API is made of structs (`sockaddr_*`, `addrinfo`) that Oberon
 should not mirror. The C part turns them into integers and text.
 
-The name `Sockets` is generic and may clash with a module of the same
-name in another library or a later poc runtime (Open questions).
+The names stay `Sockets` and `SocketTasks`, unprefixed (decided
+2026-11-15): they read well at every call site, poc's runtime has no
+module by either name, and posockets is meant for poc only, so a clash
+would be with Peaseblossom's own runtime, which can avoid it.
 
 ### Integer model
 
@@ -99,7 +101,9 @@ TYPE
     fd-: LONGINT;          (* -1 once closed *)
     family-: INTEGER;      (* inet, inet6, unix *)
     listening-: BOOLEAN;   (* made by Listen, or SO_ACCEPTCONN on Adopt *)
-    nonBlocking-: BOOLEAN
+    nonBlocking-: BOOLEAN;
+    deadline-: LONGINT;    (* monotonic ms, 0 for none (Deadlines) *)
+    waiters-: INTEGER      (* SocketTasks calls waiting on it now *)
   END;
 ```
 
@@ -115,21 +119,25 @@ fills in the other fields from the kernel: `family` from
 is a cache: a caller that changes the mode behind posockets' back (with
 `fcntl` in C) makes it wrong, which is documented, not detected.
 
-The deadline state (Deadlines) can't live in `Sockets`' own logic,
-since `Sockets` never imports `Tasks`: either `SocketDesc` carries
-fields that only `SocketTasks` reads and writes (a deadline time and a
-timed-out flag), or `SocketTasks` keeps its own table or extension
-type. To be decided in Phase 4, before `SocketTasks` is written, since
-it shapes `SocketDesc`.
+`deadline` and `waiters` are for `SocketTasks` (decided 2026-11-15).
+They live in `SocketDesc` because `Close`, in `Sockets`, must see
+`waiters`, and `Sockets` never imports `Tasks`. Read-only export means
+`SocketTasks` can't assign them, so `Sockets` exports the procedures
+that do: `SetDeadline(s, ms)` (from now, on the C part's monotonic
+clock; 0 clears it), which any caller may use, and `BeginWait(s)` /
+`EndWait(s)`, which are for `SocketTasks` only and say so.
 
 `Close(s)` closes the descriptor and sets `fd` to -1; on a closed
 socket it does nothing, so it is safe to call twice. `close` is never
 retried on `EINTR` (on Linux the descriptor is gone either way).
 
-`Close` must not be called while another task waits on the socket:
-that task's `poll` would see `POLLNVAL`, or worse, a reused number
-(Open questions, on detecting it). A task that wants another to stop
-uses `Shutdown`, as deadlines do.
+`Close` while another task waits on the socket halts (code 86; decided
+2026-11-15): that task's `poll` would see `POLLNVAL`, or worse, a
+reused number, and data would go silently to the wrong place.
+`SocketTasks` counts its waits in `waiters`, so a `Close` that finds it
+nonzero is caught. Waits made outside `SocketTasks` (polibtls's) aren't
+counted; that stays documented only. A task that wants another to stop
+uses a deadline or `Shutdown`.
 
 A plain `close` of a TCP socket with unread data in its receive buffer
 sends RST instead of FIN, and the peer may lose the end of what was
@@ -188,33 +196,41 @@ harmless (it resolves once, at start), and numeric hosts never block
 inside a busy task-based program would stall it; an asynchronous
 resolver is out of scope for now (Open questions).
 
-- `Listen(host, service, backlog, VAR listeners, VAR n, VAR err):
+Ports are `INTEGER`s, 0..65535 (halt 84 outside), not service names
+(decided 2026-11-15): every known caller has a number, and a name would
+mean reading `/etc/services` and another kind of error. The C part
+formats the number for `getaddrinfo` with `AI_NUMERICSERV`.
+
+- `Listen(host, port, backlog, VAR listeners, VAR n, VAR err):
   BOOLEAN`: `AI_PASSIVE`; an empty host means every address of both
   families. One socket per family the host resolves to (one per
   distinct address otherwise), each with `SO_REUSEADDR`, IPv6 ones with
   `IPV6_V6ONLY`. One listener per family because OpenBSD has no
-  dual-stack sockets, and the same code then runs everywhere. With
-  port 0 and both families, the kernel picks a different port for
-  each; a caller that needs one port binds the first, reads its port
-  back, and binds the second to it (`ListenOn` does this; Phase 3).
-  Whether `Listen` should simply always do this for port 0, retrying a
-  few times if the second bind gets `EADDRINUSE`, is an open question.
+  dual-stack sockets, and the same code then runs everywhere.
+- Port 0 gives every listener the same port (decided 2026-11-15, in
+  place of a separate `ListenOn`): `Listen` binds the first address,
+  reads its port back, and binds the rest to it. If a later bind finds
+  that port taken (`EADDRINUSE`), it closes what it made and starts
+  again with port 0, a few times, before reporting the error.
 - `getaddrinfo` is called with `ai_socktype = SOCK_STREAM`; without it
   each address comes back once per socket type, and `Listen` would try
   to bind it twice.
-- If one family can't be bound (IPv6 disabled gives `EAFNOSUPPORT` or
-  `EADDRNOTAVAIL` for `::`), `Listen` either skips it or fails and
-  closes the sockets it made: open question. A `listeners` array too
-  small for the addresses found is a programmer error (halt 84), since
-  two (one per family) suffices for every host but a name with many
-  addresses.
-- `Connect(host, service, VAR s, VAR err): BOOLEAN`: tries each
+- A family that can't be bound (decided 2026-11-15): for the empty
+  host only, `EAFNOSUPPORT` and `EADDRNOTAVAIL` skip that family, so a
+  host with IPv6 disabled still serves IPv4; `n` says how many
+  listeners were made. Any other failure, and any failure for a host
+  the caller named, closes the sockets made and is reported: the caller
+  asked for those addresses. If every family is skipped, that is an
+  error too. A `listeners` array too small for the addresses found is a
+  programmer error (halt 84), since two (one per family) suffices for
+  every host but a name with many addresses.
+- `Connect(host, port, VAR s, VAR err): BOOLEAN`: tries each
   address in `getaddrinfo`'s order until one connects, and reports the
   last error. This works only in blocking mode: a non-blocking
   `connect` stops at the first address with `wouldBlock`, and if
   `FinishConnect` then fails, nothing tries the next one. So `Sockets`
   also offers the two halves:
-  - `Resolve(host, service, VAR addrs, VAR n, VAR err): BOOLEAN`,
+  - `Resolve(host, port, VAR addrs, VAR n, VAR err): BOOLEAN`,
     `getaddrinfo`'s results as `Address` values (numeric text, so the
     C part converts them back with `AI_NUMERICHOST` and no lookup);
   - `ConnectTo(a, nonBlocking, VAR s, VAR err): BOOLEAN`, one address.
@@ -289,7 +305,8 @@ prefix long.
   itself would need the disposition restored around the child, which
   `Platform.System` doesn't offer.
 - `Shutdown(s, how)`: `read`, `write` or `both`; how a server ends a
-  plain response, and how a deadline wakes a waiting task (below).
+  plain response, and how one task cuts off another's wait on a
+  connection (a proxy, or a TLS wait outside `SocketTasks`).
 - `SetNonBlocking(s, on)`: `O_NONBLOCK`. Sockets made by `Listen`,
   `Accept` and `Connect` take a `nonBlocking` argument and set it at
   creation (`SOCK_NONBLOCK`, `accept4`), so no window exists in which a
@@ -348,52 +365,57 @@ The main program is a task too (`Tasks.Mod`'s comment), so
 task" to halt on. Tasks still running when the main body ends are
 abandoned, so a server's main body `Join`s its accept tasks.
 
-**Stopping a server** isn't designed yet (Open questions): an accept
-task awaiting its listener needs a way to be told to stop, and
-`shutdown` on a listening socket wakes a blocked `accept` on Linux but
-not on the BSDs, so the deadline trick doesn't carry over.
+**Stopping a server** (decided 2026-11-15) uses deadlines: the accept
+task calls `SocketTasks.Accept` with a short deadline (about a
+second), and on `timedOut` checks a "stop" flag the server sets, then
+either returns or accepts again. Stopping takes up to that interval,
+which is fine for a server. This needs nothing beyond the timed wait
+(Deadlines), and is the same on every system; `shutdown` of a listener,
+which wakes `accept` on Linux but not on the BSDs, isn't used.
 
 ### Deadlines
 
 `Tasks.AwaitReadable`/`AwaitWritable` have no timeout (AGENTS.md,
 "Confirmed facts"), but a server must not let a client hold a task
-forever by sending nothing. The plan, to be confirmed in Phase 5:
+forever by sending nothing.
 
-- A deadline is a time on the socket (`SetDeadline(s, ms)`, 0 for
-  none). `SocketTasks` starts one watchdog task per socket with a
-  deadline, which sleeps (`Tasks.Sleep`) until the deadline and, if the
-  socket's operation hasn't finished, sets a flag and calls
-  `shutdown(fd, SHUT_RDWR)`. The waiting task's `poll` then sees the
-  descriptor readable and writable, its retry fails, and it sees the
-  flag and reports `timedOut`.
-- `shutdown`, never `close`: closing a descriptor another task is
-  polling invites the number's reuse under it.
-- A deadline that passes ends the connection: `shutdown` can't be
-  undone. It is a limit on a connection's life or on one exchange,
-  not a timeout after which the same operation may be tried again.
-  `SocketTasks`' comments say so.
-- The watchdog holds the `Socket`, not the bare descriptor, so after
-  the owner's `Close` it reads `fd` = -1 and does nothing, rather than
-  shutting down a reused number.
-- Cost: a watchdog task per connection doubles the tasks, and each
-  task has its own `mmap`'d stack. With one deadline per connection
-  that is tolerable; it is the main argument for the alternatives.
-- Alternatives, if this proves awkward: a single timer task over all
-  sockets' deadlines (fewer tasks, more bookkeeping); a `Tasks.Select`
-  on `Tasks.After` (needs the descriptor wait as a channel, which
-  `Tasks` doesn't offer); or asking Peaseblossom for a timed
-  `AwaitReadable`, which would be the clean fix (Open questions).
-- The timed wait looks small upstream (read 2026-11-15): every task
-  already has a timer (`current.timer`, used by `Sleep`), and
+**Decided 2026-11-15: a timed descriptor wait added to poc's `Tasks`**,
+rather than working around its absence here. posockets is for poc
+only, and Peaseblossom is the same author's, so the clean fix upstream
+is in reach, and it solves stopping a server (Tasks) too.
+
+- Upstream: something like `Tasks.AwaitReadableFor(fd, ms): BOOLEAN`
+  and `AwaitWritableFor`, `TRUE` when the descriptor is ready, `FALSE`
+  when the time passed first. It looks small (read 2026-11-15): every
+  task already has a timer (`current.timer`, used by `Sleep`), and
   `AddTimer`/`ExpireTimers` run timers alongside the descriptor wait;
-  an `AwaitDescriptor` that also arms the task's timer, and reports
-  which woke it, is most of it. Raise it with Peaseblossom before
-  Phase 5, and build the watchdog only if it can't come soon.
+  `AwaitDescriptor` arms the task's timer too, and whichever wakes the
+  task first removes it from the other's list. The exact names and
+  shape are Peaseblossom's to decide. POSIX only, as descriptor waits
+  are.
+- Here: a deadline is a time on the socket (`SetDeadline(s, ms)`, 0
+  for none; Sockets and closing). Each `SocketTasks` wait passes the
+  time remaining to the timed wait, and on `FALSE` returns `timedOut`.
+- A timed-out operation leaves the socket usable: nothing was shut
+  down, and the caller may set a new deadline and try again (as the
+  accept loop does). A partly done `WriteAll` reports the bytes
+  written in `n`.
+- Phase 5 depends on the upstream change, and on a poc release with it
+  (or building against the Peaseblossom checkout). Phases 1-4 don't.
 
-A deadline set on a socket covers polibtls's waits too only if polibtls
-waits through `SocketTasks`; it doesn't (it never imports posockets),
-so the Gemini server arms the deadline here and lets the `shutdown`
-wake polibtls's wait. To be tried in polibtls's Phase 6.
+Considered and set aside: a watchdog task per socket that `shutdown`s
+it at the deadline (works with today's `Tasks`, but doubles the
+tasks and their stacks, and a deadline would end the connection); one
+timer task over all sockets (more bookkeeping, same `shutdown`); a
+`Tasks.Select` on `Tasks.After` (needs the descriptor wait as a
+channel). The watchdog stays the fallback if the upstream change is
+refused.
+
+polibtls's waits don't go through `SocketTasks` (it never imports
+posockets), so a deadline set here doesn't cover them. With the timed
+wait in `Tasks`, polibtls's own loops can take a deadline the same way;
+that belongs in polibtls's PLAN.md. A Gemini server can also still
+`Shutdown` a connection from another task to cut off a TLS wait.
 
 ### Portability
 
@@ -430,6 +452,7 @@ Recorded as found, each with the `#ifdef` that handles it:
 | 83 | a Unix-domain path too long for `sun_path` |
 | 84 | an argument out of range: port outside 0..65535, negative backlog, unknown `how` or family, a `listeners` or `addrs` array too small |
 | 85 | `Accept` on a socket that isn't listening, or I/O on one that is (`listening`) |
+| 86 | `Close` on a socket a `SocketTasks` call is waiting on (`waiters` > 0) |
 
 Code 82 no longer covers "`SocketTasks` used outside a task" (changed
 2026-11-15): the main program is a task, so that can't happen.
@@ -492,7 +515,7 @@ Still to confirm:
   writing; and `POLLHUP`/`POLLERR` waking `AwaitReadable`. (The source
   says both work; Tasks, above.)
 - `shutdown(SHUT_RDWR)` from one task wakes another awaiting the same
-  descriptor (the basis of Deadlines).
+  descriptor (how one task cuts off another's wait; Shutdown).
 - Passing an `ARRAY OF CHAR` host and a `VAR ARRAY OF CHAR` result
   buffer to C, and the C part writing text back with a length limit.
   The C part takes `LEN` of every array it reads as well, and stops at
@@ -514,7 +537,8 @@ listening), halt tests.
 
 ### Phase 3: blocking TCP
 
-`Listen`, `ListenOn`, `Accept`, `Connect`, `Resolve`, `ConnectTo`,
+`Listen` (with port 0 shared across families), `Accept`, `Connect`,
+`Resolve`, `ConnectTo`,
 `Read`, `Write`, `WriteAll`, `Shutdown`, `Close`, `LocalAddress`,
 `PeerAddress`, `Adopt`, `IgnoreBrokenPipe`. `TestAddress`,
 `TestBlocking`, `TestErrors`.
@@ -523,17 +547,19 @@ listening), halt tests.
 
 `SetNonBlocking`, the `nonBlocking` argument, `wouldBlock`,
 `FinishConnect`; `SocketTasks`, with `Connect` over `Resolve` and
-`ConnectTo`, and the lingering close (Sockets and closing). Where the
-deadline state lives is decided first (Sockets and closing), and how
-to stop a server (Open questions). `TestTasks`. After this phase
-polibtls can start its Phase 5 (TCP); `make install` here first.
+`ConnectTo`, and the lingering close (Sockets and closing);
+`waiters`, `BeginWait`/`EndWait` and halt 86. `TestTasks`. After this
+phase polibtls can start its Phase 5 (TCP); `make install` here first.
 
 ### Phase 5: deadlines
 
-A timed descriptor wait in `Tasks` if Peaseblossom adds one (asked
-before this phase starts); otherwise the watchdog design (Deadlines),
-or one of its alternatives if Phase 0 or this phase shows it doesn't
-work. `TestDeadline`.
+Needs the timed descriptor wait in poc's `Tasks` (Deadlines), so that
+is done in Peaseblossom first, as its own change with its own tests.
+Then `SetDeadline`, the timed waits in `SocketTasks`, `timedOut`, and
+stopping an accept loop with a deadline and a flag. `TestDeadline`: a
+client that sends nothing is cut off near its deadline, one that sends
+in time is not, a socket is usable after a timeout, and an accept loop
+stops within its interval.
 
 ### Phase 6: Unix-domain sockets
 
@@ -560,14 +586,13 @@ difference behind an `#ifdef` and add it to Portability.
 
 ## Open questions
 
-- **Module names.** `Sockets` and `SocketTasks` are generic; poc's
-  runtime has no module by either name (checked 2026-11-15), but a
-  later one, or another library, might. A prefix (`PoSockets`) avoids
-  the clash at the cost of longer names in every user's code. Decide
-  before Phase 1, since the C labels carry the name.
-- **Deadlines.** Watchdog task per socket, one timer task, or a timed
-  wait added to `Tasks` upstream (Deadlines). Raise the last with
-  Peaseblossom whatever is chosen: it is what `Tasks` lacks.
+- ~~**Module names.** `Sockets` and `SocketTasks`, or a prefix
+  (`PoSockets`)?~~ Decided 2026-11-15: `Sockets` and `SocketTasks`
+  (Modules).
+- ~~**Deadlines.** Watchdog task per socket, one timer task, or a timed
+  wait added to `Tasks` upstream?~~ Decided 2026-11-15: a timed wait
+  added to poc's `Tasks` (Deadlines); the watchdog only if that is
+  refused.
 - **Asynchronous name resolution.** `getaddrinfo` stops every task.
   Options if a user needs names resolved while serving: resolve in a
   child process and read the answer through a pipe; `getaddrinfo_a`
@@ -578,27 +603,18 @@ difference behind an `#ifdef` and add it to Portability.
   Add a binary form only when such a caller appears.
 - **systemd socket activation.** `Adopt` covers the mechanism; reading
   `LISTEN_FDS` is the server's business, or a small helper here.
-- **Port or service.** polibtls asked for `Listen(host, port, ...)`
-  with an `INTEGER` port; Names has a `service` string, which allows
-  `"gemini"` from `/etc/services` but makes halt 84's port range
-  meaningless. An `INTEGER` port is simpler and never consults a file;
-  a service string is more general. Decide before Phase 3.
-- **Port 0 on both families.** Keep `ListenOn` separate, or have
-  `Listen` always give both families the same port when asked for
-  port 0 (retrying if the second bind finds it taken)? The second is
-  one call that does the expected thing.
-- **One family failing in `Listen`.** Skip a family that can't be
-  bound (a host with IPv6 disabled still serves IPv4), or fail the
-  whole call and close what was made? Skipping is friendlier but hides
-  a misconfiguration; perhaps skip only `EAFNOSUPPORT`/`EADDRNOTAVAIL`
-  for the empty host, and fail otherwise.
-- **`Close` while another task waits.** Document it as forbidden only,
-  or have `SocketTasks` count the tasks waiting on each socket and halt
-  (a new code) when `Close` finds one? The count would live with the
-  deadline state.
-- **Stopping a server.** How an accept task learns to stop: a flag
-  checked after each wake plus something that wakes it (a
-  `Tasks.Event` can't, since the task is in `AwaitReadable`;
-  `shutdown` of the listener does on Linux only; a self-connection to
-  the listener works everywhere but is a trick). A timed wait in
-  `Tasks` would make it a polling flag. Decide in Phase 4.
+- ~~**Port or service.** An `INTEGER` port, as polibtls asked, or a
+  service string?~~ Decided 2026-11-15: an `INTEGER` port (Names).
+- ~~**Port 0 on both families.** Keep `ListenOn` separate, or have
+  `Listen` give both families the same port?~~ Decided 2026-11-15:
+  `Listen` does it, retrying if the second bind finds the port taken;
+  no `ListenOn` (Names).
+- ~~**One family failing in `Listen`.** Skip it, or fail the whole
+  call?~~ Decided 2026-11-15: skip only `EAFNOSUPPORT`/`EADDRNOTAVAIL`
+  for the empty host, fail otherwise (Names).
+- ~~**`Close` while another task waits.** Document only, or count
+  waiters and halt?~~ Decided 2026-11-15: count them in `waiters` and
+  halt with code 86 (Sockets and closing).
+- ~~**Stopping a server.** How an accept task learns to stop.~~
+  Decided 2026-11-15: an accept with a short deadline, then a flag
+  check, on the timed wait (Tasks).

@@ -92,7 +92,7 @@ check its own count through `/proc/self/fd`.
   the calls that never wait (or wait in the kernel, in blocking mode).
   The C part does everything that touches `struct sockaddr`,
   `getaddrinfo`, socket options and `errno`, and hands Oberon only
-  integers and text. The module name is an open question (PLAN.md).
+  integers and text. The names stay unprefixed (PLAN.md, "Modules").
 - `src/SocketTasks.Mod`: the same operations waiting through `Tasks`
   instead of in the kernel, and deadlines.
 - `test/`, `examples/`: as polibfyaml's.
