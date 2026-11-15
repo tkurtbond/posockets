@@ -98,6 +98,7 @@ TYPE
   SocketDesc* = RECORD
     fd-: LONGINT;          (* -1 once closed *)
     family-: INTEGER;      (* inet, inet6, unix *)
+    listening-: BOOLEAN;   (* made by Listen, or SO_ACCEPTCONN on Adopt *)
     nonBlocking-: BOOLEAN
   END;
 ```
@@ -107,11 +108,35 @@ visible (`fd` = -1) and every operation can halt on it (Halt codes)
 instead of acting on a descriptor number the kernel may have handed to
 something else. `fd` is read-only and exported, for `Tasks`, `Platform`
 and polibtls. `Adopt(fd)` wraps a descriptor made elsewhere (one
-inherited from a parent, or from systemd's socket activation).
+inherited from a parent, or from systemd's socket activation), and
+fills in the other fields from the kernel: `family` from
+`getsockname`, `listening` from `SO_ACCEPTCONN`, `nonBlocking` from
+`fcntl(F_GETFL)`. `listening` is what halt code 85 checks. `nonBlocking`
+is a cache: a caller that changes the mode behind posockets' back (with
+`fcntl` in C) makes it wrong, which is documented, not detected.
+
+The deadline state (Deadlines) can't live in `Sockets`' own logic,
+since `Sockets` never imports `Tasks`: either `SocketDesc` carries
+fields that only `SocketTasks` reads and writes (a deadline time and a
+timed-out flag), or `SocketTasks` keeps its own table or extension
+type. To be decided in Phase 4, before `SocketTasks` is written, since
+it shapes `SocketDesc`.
 
 `Close(s)` closes the descriptor and sets `fd` to -1; on a closed
 socket it does nothing, so it is safe to call twice. `close` is never
 retried on `EINTR` (on Linux the descriptor is gone either way).
+
+`Close` must not be called while another task waits on the socket:
+that task's `poll` would see `POLLNVAL`, or worse, a reused number
+(Open questions, on detecting it). A task that wants another to stop
+uses `Shutdown`, as deadlines do.
+
+A plain `close` of a TCP socket with unread data in its receive buffer
+sends RST instead of FIN, and the peer may lose the end of what was
+written to it. A server that ends a response by closing should shut
+down its writing side, read and discard until end of stream or a short
+deadline, then close (the "lingering close"). The Gemini server needs
+this; a `SocketTasks` helper for it is likely (Phase 4).
 
 **No finalizer closes a socket** (decided 2026-11-15). polibtls's
 `Connection` holds only the descriptor, so a `Socket` that became
@@ -128,7 +153,7 @@ if a user asks, and then as an opt-in.
 TYPE
   Address* = RECORD
     family-: INTEGER;
-    host-: ARRAY 64 OF CHAR;    (* numeric: "192.0.2.1", "2001:db8::1", or a Unix path *)
+    host-: ARRAY 128 OF CHAR;   (* numeric: "192.0.2.1", "2001:db8::1", or a Unix path *)
     port-: INTEGER
   END;
 ```
@@ -141,9 +166,18 @@ does a reverse lookup, which would block. `LocalAddress(s, VAR a)`
 An IPv4-mapped IPv6 address doesn't arise, since IPv6 listeners are
 `IPV6_V6ONLY`. A Unix-domain path is limited to `sun_path`'s size
 (108 bytes on Linux, 104 on the BSDs): longer is a programmer error.
-Scope ids (`fe80::1%eth0`) come back as `getnameinfo` writes them; the
-buffer is sized for the longest such text plus a margin, to be checked
-in Phase 2.
+Scope ids (`fe80::1%eth0`) come back as `getnameinfo` writes them.
+`host` is 128 characters because it must hold a Unix path (up to 108
+bytes with its terminator); an IPv6 address with a scope id is at most
+`INET6_ADDRSTRLEN` (46) plus `%` and an interface name (`IF_NAMESIZE`,
+16), so it fits too. (It was 64 until 2026-11-15, too short for a
+path.) The sizes are to be checked in Phase 2.
+
+The peer of an accepted Unix-domain connection usually has no name
+(the client didn't `bind`); its `Address` then has family `unix` and
+an empty `host`. Linux's abstract namespace (a `sun_path` starting with
+a NUL byte) is out of scope: it isn't portable, and its names aren't
+text.
 
 ### Names
 
@@ -163,10 +197,36 @@ resolver is out of scope for now (Open questions).
   port 0 and both families, the kernel picks a different port for
   each; a caller that needs one port binds the first, reads its port
   back, and binds the second to it (`ListenOn` does this; Phase 3).
+  Whether `Listen` should simply always do this for port 0, retrying a
+  few times if the second bind gets `EADDRINUSE`, is an open question.
+- `getaddrinfo` is called with `ai_socktype = SOCK_STREAM`; without it
+  each address comes back once per socket type, and `Listen` would try
+  to bind it twice.
+- If one family can't be bound (IPv6 disabled gives `EAFNOSUPPORT` or
+  `EADDRNOTAVAIL` for `::`), `Listen` either skips it or fails and
+  closes the sockets it made: open question. A `listeners` array too
+  small for the addresses found is a programmer error (halt 84), since
+  two (one per family) suffices for every host but a name with many
+  addresses.
 - `Connect(host, service, VAR s, VAR err): BOOLEAN`: tries each
   address in `getaddrinfo`'s order until one connects, and reports the
-  last error. (Happy Eyeballs, racing the families, is a later
-  refinement with `SocketTasks`, if a user needs it.)
+  last error. This works only in blocking mode: a non-blocking
+  `connect` stops at the first address with `wouldBlock`, and if
+  `FinishConnect` then fails, nothing tries the next one. So `Sockets`
+  also offers the two halves:
+  - `Resolve(host, service, VAR addrs, VAR n, VAR err): BOOLEAN`,
+    `getaddrinfo`'s results as `Address` values (numeric text, so the
+    C part converts them back with `AI_NUMERICHOST` and no lookup);
+  - `ConnectTo(a, nonBlocking, VAR s, VAR err): BOOLEAN`, one address.
+
+  `SocketTasks.Connect` loops over `Resolve`'s addresses with
+  `ConnectTo` and `FinishConnect`, as blocking `Connect` does in C.
+  (Happy Eyeballs, racing the families, is a later refinement on the
+  same halves, if a user needs it.)
+- A blocking `Connect` has no timeout of its own: to an address that
+  doesn't answer it waits for the kernel to give up (about two minutes
+  on Linux, by `tcp_syn_retries`). Documented; a caller that minds uses
+  `SocketTasks`, whose deadlines cover connecting.
 - `ListenUnix(path, backlog, ...)`, `ConnectUnix(path, ...)`: the path
   is the caller's to remove; posockets never unlinks a file it didn't
   make, and doesn't remove a stale socket file before binding (an
@@ -182,6 +242,7 @@ Anything the network or the system does is a `BOOLEAN` result and an
 TYPE
   Error* = RECORD
     kind-: INTEGER;      (* none, system, name, closed, wouldBlock, timedOut *)
+    want-: INTEGER;      (* wantRead or wantWrite, when kind = wouldBlock *)
     code-: INTEGER;      (* errno, or getaddrinfo's EAI_ code *)
     text-: ARRAY 256 OF CHAR
   END;
@@ -195,15 +256,23 @@ closed in an orderly way (a read of 0), so a caller can tell end of
 stream from failure; `wouldBlock` is a non-blocking call that needs a
 wait (with the direction: `wantRead` or `wantWrite`), and `timedOut` a
 deadline that passed. Constants for the `errno` values a caller acts on
-(`ECONNREFUSED`, `ECONNRESET`, `EPIPE`, `EADDRINUSE`, `EMFILE`) come
-from the C part, since their numbers differ between systems.
+(`ECONNREFUSED`, `ECONNRESET`, `EPIPE`, `EADDRINUSE`, `EMFILE`,
+`ENFILE`) come from the C part, since their numbers differ between
+systems. `getaddrinfo`'s `EAI_SYSTEM` is reported as a `system` error
+with the `errno` it leaves, not as a `name` error with no detail.
+`text` is truncated, not overflowed, when a long host name makes the
+prefix long.
 
 ### I/O
 
 - `Read(s, VAR buf, pos, len, VAR n, VAR err): BOOLEAN` and
   `Write(s, buf, pos, len, VAR n, VAR err): BOOLEAN`, offsets into an
   open array as in polibtls, so no slice copies. Short reads and writes
-  are normal; `WriteAll` loops over them.
+  are normal; `WriteAll` loops over them. On a non-blocking socket,
+  `Sockets.WriteAll` returns `wouldBlock` with `n` the bytes written so
+  far, so the caller can resume. A `Read` with `len` = 0 returns at
+  once with `n` = 0 and no error; only a read of 0 with `len` > 0 means
+  `closed`.
 - Reads are `recv`, writes `send` with `MSG_NOSIGNAL` (Linux, and the
   BSDs that have it; `SO_NOSIGPIPE` on those that don't, to be checked
   in the port), so a write to a closed peer fails with `EPIPE` instead
@@ -212,27 +281,48 @@ from the C part, since their numbers differ between systems.
   when something else writes to the socket: libtls writes through
   OpenSSL, which uses `write`, out of posockets' reach. A program using
   polibtls calls it once at start. Whether poc's `Platform` already
-  touches `SIGPIPE` is to be checked in Phase 0.
+  touches `SIGPIPE` is to be checked in Phase 0. An ignored signal stays
+  ignored across `exec`, so every child the program starts afterwards
+  (`Platform.System`) inherits it, and a pipeline such as `yes | head`
+  in such a child never ends. To be documented on `IgnoreBrokenPipe`;
+  a program that runs children and needs `SIGPIPE` ignored only for
+  itself would need the disposition restored around the child, which
+  `Platform.System` doesn't offer.
 - `Shutdown(s, how)`: `read`, `write` or `both`; how a server ends a
   plain response, and how a deadline wakes a waiting task (below).
 - `SetNonBlocking(s, on)`: `O_NONBLOCK`. Sockets made by `Listen`,
   `Accept` and `Connect` take a `nonBlocking` argument and set it at
   creation (`SOCK_NONBLOCK`, `accept4`), so no window exists in which a
-  task could block on one.
+  task could block on one. `Accept` always passes the flags explicitly,
+  since a plain `accept` copies `O_NONBLOCK` from the listener on the
+  BSDs but not on Linux (Portability).
 - Non-blocking `Connect` returns `wouldBlock` (`EINPROGRESS`) with the
   socket made; the caller waits for writable and calls
-  `FinishConnect(s, VAR err)`, which reads `SO_ERROR`.
+  `FinishConnect(s, VAR err)`, which reads `SO_ERROR`. It may instead
+  succeed at once (`connect` returns 0, as it can to a loopback
+  address), and then returns `TRUE` with no wait needed.
+- A `connect` interrupted by a signal (`EINTR`) can't simply be
+  called again: the connection goes on in the background, and a second
+  call gives `EALREADY` or `EISCONN`. The C part's blocking connect
+  then `poll`s for writable (retrying `poll`'s own `EINTR`) and reads
+  `SO_ERROR`, as `FinishConnect` does.
 - Non-blocking `Accept` returns `wouldBlock` on `EAGAIN`. Errors that
   belong to the connection being accepted, not the listener
   (`ECONNABORTED`, and on Linux the network errors `accept(2)` lists),
   are retried in C rather than reported, so an accept loop never stops
   because one client gave up.
+- `EMFILE` and `ENFILE` from `accept` are reported, never retried:
+  the pending connection stays queued, the listener stays readable, and
+  a loop that awaits and retries spins at full CPU. The caller backs
+  off (`Tasks.Sleep`, or closing idle connections) before accepting
+  again; the echo example (Phase 8) shows it, and `SocketTasks.Accept`'s
+  comment says so.
 
 ### Tasks
 
-`SocketTasks`'s procedures take a non-blocking socket (halt otherwise:
-on a blocking one they would stop every task) and loop: try the call,
-and on `wouldBlock` `Tasks.AwaitReadable`/`AwaitWritable` on `s.fd` and
+`SocketTasks`'s procedures take a non-blocking socket (halt 82
+otherwise: on a blocking one they would stop every task) and loop: try
+the call, and on `wouldBlock` `Tasks.AwaitReadable`/`AwaitWritable` on `s.fd` and
 try again. An accept loop is one task per listener, each starting a
 task per connection. Each task has its own stack; posockets' own calls
 are shallow, but the stack size a server needs comes from what runs
@@ -243,6 +333,25 @@ reading, one writing, as a proxy does), and whether `poll`'s `POLLHUP`
 and `POLLERR` wake an `AwaitReadable`, are to be confirmed in Phase 0;
 `Tasks.Mod`'s comment says a descriptor "at its end or in error" counts
 as readable.
+
+Read in poc's source on 2026-11-15, not yet run (Phase 0 still to
+confirm by a program): `Tasks.Idle` adds one `pollfd` per waiting task,
+so two tasks on one descriptor get two entries; `TaskWaiting.Ready`
+wakes a task on any nonzero `revents`, so `POLLHUP`, `POLLERR` and
+`POLLNVAL` all wake it; the `pollfd` table doubles as needed, so the
+number of waiting connections has no fixed limit (the table is rebuilt
+on every idle wait, which is linear in waiters, fine at a Gemini
+server's scale).
+
+The main program is a task too (`Tasks.Mod`'s comment), so
+`SocketTasks` can be called from the main body; there is no "outside a
+task" to halt on. Tasks still running when the main body ends are
+abandoned, so a server's main body `Join`s its accept tasks.
+
+**Stopping a server** isn't designed yet (Open questions): an accept
+task awaiting its listener needs a way to be told to stop, and
+`shutdown` on a listening socket wakes a blocked `accept` on Linux but
+not on the BSDs, so the deadline trick doesn't carry over.
 
 ### Deadlines
 
@@ -259,11 +368,27 @@ forever by sending nothing. The plan, to be confirmed in Phase 5:
   flag and reports `timedOut`.
 - `shutdown`, never `close`: closing a descriptor another task is
   polling invites the number's reuse under it.
+- A deadline that passes ends the connection: `shutdown` can't be
+  undone. It is a limit on a connection's life or on one exchange,
+  not a timeout after which the same operation may be tried again.
+  `SocketTasks`' comments say so.
+- The watchdog holds the `Socket`, not the bare descriptor, so after
+  the owner's `Close` it reads `fd` = -1 and does nothing, rather than
+  shutting down a reused number.
+- Cost: a watchdog task per connection doubles the tasks, and each
+  task has its own `mmap`'d stack. With one deadline per connection
+  that is tolerable; it is the main argument for the alternatives.
 - Alternatives, if this proves awkward: a single timer task over all
   sockets' deadlines (fewer tasks, more bookkeeping); a `Tasks.Select`
   on `Tasks.After` (needs the descriptor wait as a channel, which
   `Tasks` doesn't offer); or asking Peaseblossom for a timed
   `AwaitReadable`, which would be the clean fix (Open questions).
+- The timed wait looks small upstream (read 2026-11-15): every task
+  already has a timer (`current.timer`, used by `Sleep`), and
+  `AddTimer`/`ExpireTimers` run timers alongside the descriptor wait;
+  an `AwaitDescriptor` that also arms the task's timer, and reports
+  which woke it, is most of it. Raise it with Peaseblossom before
+  Phase 5, and build the watchdog only if it can't come soon.
 
 A deadline set on a socket covers polibtls's waits too only if polibtls
 waits through `SocketTasks`; it doesn't (it never imports posockets),
@@ -281,6 +406,15 @@ Recorded as found, each with the `#ifdef` that handles it:
 - No dual-stack sockets on OpenBSD: handled by design (Names).
 - `sun_path` size: 108 on Linux, 104 on the BSDs.
 - `errno` and `EAI_` numbers differ: always from the C part.
+- `O_NONBLOCK` inheritance: a plain `accept` copies it from the
+  listener on the BSDs, not on Linux. `accept4` with explicit flags is
+  meant to make it the same everywhere; to be checked on each BSD.
+- `strerror_r`: glibc's GNU version returns a `char *` (maybe not the
+  buffer), the POSIX (XSI) one an `int`; the C part must handle both,
+  by feature macro or by `#ifdef __GLIBC__`.
+- `shutdown` on a listening socket: wakes a blocked `accept` with
+  `EINVAL` on Linux; on the BSDs it fails with `ENOTCONN` and wakes
+  nothing (to be confirmed; matters for stopping a server).
 
 ### Halt codes
 
@@ -292,10 +426,13 @@ Recorded as found, each with the `#ifdef` that handles it:
 |---|---|
 | 80 | a closed socket (`fd` = -1) used, other than by `Close` |
 | 81 | a buffer range out of bounds (pos/len outside the array) |
-| 82 | a blocking socket given to a `SocketTasks` procedure, or `SocketTasks` used outside a task |
+| 82 | a blocking socket given to a `SocketTasks` procedure |
 | 83 | a Unix-domain path too long for `sun_path` |
-| 84 | an argument out of range: port outside 0..65535, negative backlog, unknown `how` or family |
-| 85 | `Accept` on a socket that isn't listening, or I/O on one that is |
+| 84 | an argument out of range: port outside 0..65535, negative backlog, unknown `how` or family, a `listeners` or `addrs` array too small |
+| 85 | `Accept` on a socket that isn't listening, or I/O on one that is (`listening`) |
+
+Code 82 no longer covers "`SocketTasks` used outside a task" (changed
+2026-11-15): the main program is a task, so that can't happen.
 
 ## Testing
 
@@ -311,11 +448,21 @@ valgrind with `poc-gc.supp`, and descriptors counted:
 - `TestBlocking`: a child process (`Platform.System` on a small helper,
   or a second test program) connects to a blocking listener; data both
   ways, short writes, `Shutdown`, a read of 0 as `closed`.
+  `Platform.System` is `system(3)` and waits for the child, so the
+  parent would block until the child ends and a two-way exchange would
+  deadlock. The helper is started in the background (`helper port &`,
+  the port read back by `LocalAddress` passed on its command line), and
+  the parent then accepts.
 - `TestTasks`: listener, accept task and client tasks in one program;
   many connections at once; a proxy-like pair of tasks on one socket.
 - `TestErrors`: connection refused (a port listened on and then
   closed), `EADDRINUSE`, a write to a reset peer giving `EPIPE` and no
-  signal, `EMFILE` by lowering `RLIMIT_NOFILE` in a child.
+  signal, `EMFILE` by lowering `RLIMIT_NOFILE` in a child. A reset
+  needs `SO_LINGER` with a zero timeout on the peer, which Phase 7 adds
+  only if a user asks, so the test uses a small C helper in `test/`
+  for it. The refused port can in principle be taken by another
+  process between the close and the connect; accepted as a rare,
+  recognisable flake on a busy machine.
 - `TestDeadline`: a client that sends nothing is cut off near its
   deadline, and one that sends in time is not.
 - `TestUnix`: `Pair`, and a listener and client on a path under
@@ -338,13 +485,19 @@ and `ReadBuf` work on one; `Tasks` has no timed descriptor wait.
 Still to confirm:
 
 - Whether poc's runtime sets or changes `SIGPIPE`'s disposition, or
-  any other signal a socket program cares about.
+  any other signal a socket program cares about. (Read 2026-11-15:
+  `Platform` installs handlers only for `SIGINT`, `SIGQUIT` and
+  `SIGILL`, on request, with `SA_RESTART`, and none for `SIGPIPE`.)
 - Two tasks awaiting one descriptor, one for reading and one for
-  writing; and `POLLHUP`/`POLLERR` waking `AwaitReadable`.
+  writing; and `POLLHUP`/`POLLERR` waking `AwaitReadable`. (The source
+  says both work; Tasks, above.)
 - `shutdown(SHUT_RDWR)` from one task wakes another awaiting the same
   descriptor (the basis of Deadlines).
 - Passing an `ARRAY OF CHAR` host and a `VAR ARRAY OF CHAR` result
   buffer to C, and the C part writing text back with a length limit.
+  The C part takes `LEN` of every array it reads as well, and stops at
+  `0X` or the length, so an array with no terminator can't make it
+  read past the end.
 
 ### Phase 1: project skeleton
 
@@ -361,20 +514,26 @@ listening), halt tests.
 
 ### Phase 3: blocking TCP
 
-`Listen`, `ListenOn`, `Accept`, `Connect`, `Read`, `Write`, `WriteAll`,
-`Shutdown`, `Close`, `LocalAddress`, `PeerAddress`, `Adopt`,
-`IgnoreBrokenPipe`. `TestAddress`, `TestBlocking`, `TestErrors`.
+`Listen`, `ListenOn`, `Accept`, `Connect`, `Resolve`, `ConnectTo`,
+`Read`, `Write`, `WriteAll`, `Shutdown`, `Close`, `LocalAddress`,
+`PeerAddress`, `Adopt`, `IgnoreBrokenPipe`. `TestAddress`,
+`TestBlocking`, `TestErrors`.
 
 ### Phase 4: non-blocking and `SocketTasks`
 
 `SetNonBlocking`, the `nonBlocking` argument, `wouldBlock`,
-`FinishConnect`; `SocketTasks`. `TestTasks`. After this phase polibtls
-can start its Phase 5 (TCP); `make install` here first.
+`FinishConnect`; `SocketTasks`, with `Connect` over `Resolve` and
+`ConnectTo`, and the lingering close (Sockets and closing). Where the
+deadline state lives is decided first (Sockets and closing), and how
+to stop a server (Open questions). `TestTasks`. After this phase
+polibtls can start its Phase 5 (TCP); `make install` here first.
 
 ### Phase 5: deadlines
 
-The watchdog design (Deadlines), or one of its alternatives if Phase 0
-or this phase shows it doesn't work. `TestDeadline`.
+A timed descriptor wait in `Tasks` if Peaseblossom adds one (asked
+before this phase starts); otherwise the watchdog design (Deadlines),
+or one of its alternatives if Phase 0 or this phase shows it doesn't
+work. `TestDeadline`.
 
 ### Phase 6: Unix-domain sockets
 
@@ -419,3 +578,27 @@ difference behind an `#ifdef` and add it to Portability.
   Add a binary form only when such a caller appears.
 - **systemd socket activation.** `Adopt` covers the mechanism; reading
   `LISTEN_FDS` is the server's business, or a small helper here.
+- **Port or service.** polibtls asked for `Listen(host, port, ...)`
+  with an `INTEGER` port; Names has a `service` string, which allows
+  `"gemini"` from `/etc/services` but makes halt 84's port range
+  meaningless. An `INTEGER` port is simpler and never consults a file;
+  a service string is more general. Decide before Phase 3.
+- **Port 0 on both families.** Keep `ListenOn` separate, or have
+  `Listen` always give both families the same port when asked for
+  port 0 (retrying if the second bind finds it taken)? The second is
+  one call that does the expected thing.
+- **One family failing in `Listen`.** Skip a family that can't be
+  bound (a host with IPv6 disabled still serves IPv4), or fail the
+  whole call and close what was made? Skipping is friendlier but hides
+  a misconfiguration; perhaps skip only `EAFNOSUPPORT`/`EADDRNOTAVAIL`
+  for the empty host, and fail otherwise.
+- **`Close` while another task waits.** Document it as forbidden only,
+  or have `SocketTasks` count the tasks waiting on each socket and halt
+  (a new code) when `Close` finds one? The count would live with the
+  deadline state.
+- **Stopping a server.** How an accept task learns to stop: a flag
+  checked after each wake plus something that wakes it (a
+  `Tasks.Event` can't, since the task is in `AwaitReadable`;
+  `shutdown` of the listener does on Linux only; a self-connection to
+  the listener works everywhere but is a trick). A timed wait in
+  `Tasks` would make it a polling flag. Decide in Phase 4.
