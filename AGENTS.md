@@ -123,7 +123,9 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
 - **`Tasks` has no timeout on a descriptor wait** (`rtl/llvm/Tasks.Mod`,
   read 2026-11-15): `AwaitReadable`/`AwaitWritable` wait until the
   descriptor is ready, however long. A deadline needs another task to
-  make it ready (PLAN.md, "Deadlines").
+  make it ready (PLAN.md, "Deadlines"). True of poc 0.12.0; the
+  Peaseblossom checkout (commit 73109d2, 2026-11-15) adds
+  `AwaitReadableFor`/`AwaitWritableFor`, not yet in a release.
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 

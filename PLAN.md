@@ -377,39 +377,52 @@ which wakes `accept` on Linux but not on the BSDs, isn't used.
 
 `Tasks.AwaitReadable`/`AwaitWritable` have no timeout (AGENTS.md,
 "Confirmed facts"), but a server must not let a client hold a task
-forever by sending nothing.
+forever by sending nothing. `Tasks` now has a timed wait for this
+(below).
 
 **Decided 2026-11-15: a timed descriptor wait added to poc's `Tasks`**,
 rather than working around its absence here. posockets is for poc
 only, and Peaseblossom is the same author's, so the clean fix upstream
 is in reach, and it solves stopping a server (Tasks) too.
 
-- Upstream: something like `Tasks.AwaitReadableFor(fd, ms): BOOLEAN`
-  and `AwaitWritableFor`, `TRUE` when the descriptor is ready, `FALSE`
-  when the time passed first. It looks small (read 2026-11-15): every
-  task already has a timer (`current.timer`, used by `Sleep`), and
-  `AddTimer`/`ExpireTimers` run timers alongside the descriptor wait;
-  `AwaitDescriptor` arms the task's timer too, and whichever wakes the
-  task first removes it from the other's list. The exact names and
-  shape are Peaseblossom's to decide. POSIX only, as descriptor waits
-  are.
+- Upstream, done 2026-11-15 (Peaseblossom commit 73109d2, after
+  0.12.0; its `doc/developer/tasks.md`, decision 15):
+  `Tasks.AwaitReadableFor(fd, ms: LONGINT): BOOLEAN` and
+  `AwaitWritableFor`, `TRUE` when `fd` is ready, `FALSE` when `ms`
+  passed first. The task waits on both its descriptor and its own
+  timer (`Sleep`'s), and whichever ends the wait removes it from the
+  other list, so nothing is left behind. If both are due at one look,
+  the timer wins: a deadline that has passed reports `FALSE` even if
+  data came in at the same moment. An `ms` that isn't positive polls
+  `fd` once, then `Yield`s, so a loop of them can't starve other
+  tasks. Trap 20 as `AwaitReadable`'s: a negative descriptor, or any
+  call on VMS (POSIX only, as descriptor waits are). Checked on Linux
+  and the three BSD VMs by Peaseblossom's fixtures `llvm-tasks-timed`
+  and `llvm-tasks-traps` (cases 17, 18); not yet re-checked here
+  (Phase 5).
 - Here: a deadline is a time on the socket (`SetDeadline(s, ms)`, 0
   for none; Sockets and closing). Each `SocketTasks` wait passes the
   time remaining to the timed wait, and on `FALSE` returns `timedOut`.
+  With no deadline it calls the untimed `AwaitReadable`/`AwaitWritable`.
+  A deadline already past still makes one wait with 0 ms, which polls
+  once: an operation that can finish at once does, and one that can't
+  returns `timedOut` without waiting.
 - A timed-out operation leaves the socket usable: nothing was shut
   down, and the caller may set a new deadline and try again (as the
   accept loop does). A partly done `WriteAll` reports the bytes
   written in `n`.
-- Phase 5 depends on the upstream change, and on a poc release with it
-  (or building against the Peaseblossom checkout). Phases 1-4 don't.
+- Phase 5 depends on the upstream change, which is pushed but in no
+  poc release yet: the installed poc is 0.12.0, so until the next
+  release Phase 5 builds against the Peaseblossom checkout. Phases 1-4
+  don't need it.
 
 Considered and set aside: a watchdog task per socket that `shutdown`s
 it at the deadline (works with today's `Tasks`, but doubles the
 tasks and their stacks, and a deadline would end the connection); one
 timer task over all sockets (more bookkeeping, same `shutdown`); a
 `Tasks.Select` on `Tasks.After` (needs the descriptor wait as a
-channel). The watchdog stays the fallback if the upstream change is
-refused.
+channel). With the timed wait upstream, the watchdog is no longer
+needed as a fallback.
 
 polibtls's waits don't go through `SocketTasks` (it never imports
 posockets), so a deadline set here doesn't cover them. With the timed
@@ -503,7 +516,8 @@ everywhere).
 Done 2026-11-15 (AGENTS.md, "Confirmed facts"): a C part beside its
 module compiles and links; `VAR ARRAY OF SYSTEM.INT32` reaches C as
 `int32_t *`; `Tasks.AwaitReadable` wakes on a socket; `Platform.Write`
-and `ReadBuf` work on one; `Tasks` has no timed descriptor wait.
+and `ReadBuf` work on one; `Tasks` had no timed descriptor wait (since
+added upstream; Deadlines).
 
 Still to confirm:
 
@@ -553,9 +567,11 @@ phase polibtls can start its Phase 5 (TCP); `make install` here first.
 
 ### Phase 5: deadlines
 
-Needs the timed descriptor wait in poc's `Tasks` (Deadlines), so that
-is done in Peaseblossom first, as its own change with its own tests.
-Then `SetDeadline`, the timed waits in `SocketTasks`, `timedOut`, and
+Needs the timed descriptor wait in poc's `Tasks` (Deadlines), done in
+Peaseblossom on 2026-11-15 with its own tests, but not yet in a poc
+release; build against the checkout or the next release. First
+re-check here, with a program, `AwaitReadableFor` on a socket: ready
+before the time, the time passing, and 0 ms. Then `SetDeadline`, the timed waits in `SocketTasks`, `timedOut`, and
 stopping an accept loop with a deadline and a flag. `TestDeadline`: a
 client that sends nothing is cut off near its deadline, one that sends
 in time is not, a socket is usable after a timeout, and an accept loop
@@ -591,8 +607,8 @@ difference behind an `#ifdef` and add it to Portability.
   (Modules).
 - ~~**Deadlines.** Watchdog task per socket, one timer task, or a timed
   wait added to `Tasks` upstream?~~ Decided 2026-11-15: a timed wait
-  added to poc's `Tasks` (Deadlines); the watchdog only if that is
-  refused.
+  added to poc's `Tasks` (Deadlines), and added there the same day
+  (`AwaitReadableFor`/`AwaitWritableFor`).
 - **Asynchronous name resolution.** `getaddrinfo` stops every task.
   Options if a user needs names resolved while serving: resolve in a
   child process and read the answer through a pipe; `getaddrinfo_a`
