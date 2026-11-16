@@ -30,11 +30,13 @@ behaviour of poc that applies here unchanged:
 
 ## Status
 
-As of 2026-11-15, Phases 1 (the skeleton) and 2 (errors and
-addresses) are done: the build, the test and valgrind runners, and
-`Sockets` with its C part, `Error`, `Address`, `Resolve`, `Pair`,
-`Close`, `LocalAddress` and `PeerAddress`. Next is Phase 3, blocking
-TCP.
+As of 2026-11-15, Phases 1 (the skeleton), 2 (errors and addresses)
+and 3 (blocking TCP) are done: the build, the test and valgrind
+runners, and `Sockets` with its C part: `Error`, `Address`, `Resolve`,
+`Pair`, `Close`, `LocalAddress`, `PeerAddress`, `Listen`, `Accept`,
+`Connect`, `ConnectTo`, `FinishConnect`, `Read`, `Write`, `WriteAll`,
+`Shutdown`, `SetNonBlocking`, `Adopt` and `IgnoreBrokenPipe`. Next is
+Phase 4, `SocketTasks`.
 
 ## Reference material
 
@@ -108,7 +110,11 @@ check its own count through `/proc/self/fd`.
 - `src/SocketTasks.Mod` (Phase 4): the same operations waiting
   through `Tasks` instead of in the kernel, and deadlines.
 - `test/`: `Check.Mod`, the tests and halt tests, `poc-gc.supp`,
-  `vg-reachable.sh`, `vg-fds.sh`. `examples/` (Phase 8): as
+  `vg-reachable.sh`, `vg-fds.sh`. `TestHelp.Mod`/`.c`: what tests need
+  that the library doesn't offer (a `poll` with a timeout, `SO_LINGER`
+  0, the descriptor limit and count). Helper programs a test runs as a
+  child (`BlockingPeer`, `TooManyFiles`) are listed in `HELPERS` and
+  built into `build/` before the tests. `examples/` (Phase 8): as
   polibfyaml's.
 - `build/`: poc and clang output, and the tests' Unix-domain sockets
   (gitignored).
@@ -170,6 +176,26 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   `-library-path` at the install directory takes it from there, not
   from source (`make install` into a scratch directory, then a program
   built against it; checked 2026-11-15).
+
+- **A test module's C part is compiled with it**: `TestHelp.c` beside
+  `test/TestHelp.Mod`, imported through `-import-path test`, was
+  compiled and linked by a plain `poc` of the test.
+- **glibc declares `accept4` only with `_GNU_SOURCE`**; `Sockets.c`
+  defines it under `#ifdef __linux__`.
+- **A blocking `connect` to a loopback listener completes before any
+  `accept`** (from the backlog), so a test can connect to its own
+  listener in one program.
+- **With no descriptor free, `accept4` fails with `EMFILE` and the
+  connection stays queued**; it is accepted once one is freed.
+- **valgrind 3.27.1 doesn't enforce a lowered `RLIMIT_NOFILE`**:
+  `getrlimit` reports the new limit, but descriptors go on being made
+  past it. A check that needs the limit runs in a child program, which
+  valgrind doesn't follow (`TooManyFiles`).
+- **Standard input isn't always `/dev/null`**: under the Claude Code
+  Bash tool it is a socket, so a test that needs a non-socket opens
+  `/dev/null` itself. `make test` gives each test `/dev/null`.
+- **`Platform.System` returns the wait status**: 0 when the command
+  exits 0, otherwise its exit code × 256.
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 

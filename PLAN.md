@@ -443,6 +443,11 @@ Recorded as found, each with the `#ifdef` that handles it:
 - No dual-stack sockets on OpenBSD: handled by design (Names).
 - `sun_path` size: 108 on Linux, 104 on the BSDs.
 - `errno` and `EAI_` numbers differ: always from the C part.
+- `accept4` in glibc's headers needs `_GNU_SOURCE`; `Sockets.c`
+  defines it under `#ifdef __linux__` only. Whether the BSDs need
+  anything is to be checked in the port.
+- `ENONET` (an `accept` error to retry) is Linux's; used under
+  `#ifdef ENONET`.
 - `O_NONBLOCK` inheritance: a plain `accept` copies it from the
   listener on the BSDs, not on Linux. `accept4` with explicit flags is
   meant to make it the same everywhere; to be checked on each BSD.
@@ -506,6 +511,28 @@ valgrind with `poc-gc.supp`, and descriptors counted:
 - `TestUnix`: `Pair`, and a listener and client on a path under
   `build/`.
 - Halt tests for every code in Halt codes.
+
+Done in Phase 3:
+
+- `test/TestHelp.Mod` and its C part `TestHelp.c`: what the tests need
+  that the library doesn't offer: a `poll` with a timeout
+  (`WaitReadable`, `WaitWritable`, so no test can hang in a blocking
+  call), `SO_LINGER` 0 for a reset (`ResetOnClose`), `dup`, the
+  descriptor limit, the count of open descriptors from
+  `/proc/self/fd`, and opening `/dev/null`. A test module's C part is
+  found and compiled by `poc -import-path test`, like a library's.
+- `test/BlockingPeer.Mod`, `TestBlocking`'s helper, built before the
+  tests (`HELPERS` in `GNUmakefile`): it connects, says `hello`, reads
+  to the end checking a byte pattern, and answers `ok <count>`.
+  `TestBlocking` starts it in the background, waits at most 10 s for
+  the connection, and exchanges 1,000,000 bytes over `127.0.0.1` and
+  `::1`.
+- `test/TooManyFiles.Mod`, `TestErrors`' `EMFILE` check, run in the
+  foreground by `Platform.System`, which returns 0 when it passes.
+  A child because valgrind doesn't enforce `RLIMIT_NOFILE` (Phase 3).
+- Standard input isn't assumed to be `/dev/null`: under some tools it
+  is a socket, so `Adopt`'s "not a socket" check opens `/dev/null`
+  itself.
 
 Each test ends with no descriptors open beyond 0, 1 and 2 (checked
 through `/proc/self/fd` on Linux, valgrind's `--track-fds=yes`
@@ -617,13 +644,64 @@ Done 2026-11-15:
 - `make test` and `make valgrind` pass, with no leak and no descriptor
   left open.
 
-### Phase 3: blocking TCP
+### Phase 3: blocking TCP [done]
 
 `Listen` (with port 0 shared across families), `Accept`, `Connect`,
 `ConnectTo`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Adopt`,
 `IgnoreBrokenPipe`. (`Resolve`, `Close`, `LocalAddress` and
 `PeerAddress` came in Phase 2.) `TestAddress`'s listening parts,
 `TestBlocking`, `TestErrors`.
+
+Done 2026-11-15:
+
+- All of the above, and `FinishConnect` and `SetNonBlocking`, which
+  the non-blocking forms need and which are plain calls, so Phase 4
+  adds only the waiting. The C part's results are 0, a positive
+  `errno`, or -1 for "would block"; the Oberon side turns them into
+  `Error`s with a `what` naming the call and the address
+  ("`bind 127.0.0.1 port 41234`", "`connect to ::1 port 41234`",
+  "`listen on nonexistent.invalid port 0`").
+- `Listen` resolves (`AI_PASSIVE`; numeric first, as `Resolve`), and
+  makes one listener per address, at most 64, with `SO_REUSEADDR`, and
+  `IPV6_V6ONLY` on IPv6 ones (Names). With port 0 the first bind's
+  port is used for the rest; if another program holds it in the other
+  family (`EADDRINUSE`), all are closed and it starts again, up to 5
+  times. For the empty host only, a family the machine lacks
+  (`EAFNOSUPPORT`, `EADDRNOTAVAIL`) is skipped; for a named host it is
+  an error, since the caller asked for that address.
+- `Accept` is `accept4` with the flags given explicitly, and retries
+  `EINTR` and the per-connection errors (I/O). `Connect` tries each
+  address in turn and reports the last failure. A blocking connect
+  interrupted by a signal waits in `poll` and reads `SO_ERROR`, as
+  designed (I/O).
+- `FinishConnect` reads `SO_ERROR`; if that is clean and
+  `getpeername` says `ENOTCONN`, the connect is still going and it
+  returns `wouldBlock` again, so calling it early is harmless.
+- `Adopt(fd)` takes a descriptor made elsewhere: the family from
+  `getsockname`, `SO_TYPE` must be `SOCK_STREAM` (else `EPROTOTYPE`),
+  `listening` from `SO_ACCEPTCONN`, `nonBlocking` from `O_NONBLOCK`.
+  A descriptor that isn't a socket (`/dev/null` in `TestErrors`) is a
+  `system` error from `getsockname`, not a halt, since where it came from is outside the program's control.
+- Halt tests: `HaltRange` (81), `HaltListening` and `HaltAccept`
+  (85), `HaltBacklog`, `HaltListeners` and `HaltShutdown` (84).
+- Linux: glibc declares `accept4` only with `_GNU_SOURCE`, so
+  `Sockets.c` defines it under `#ifdef __linux__` (Portability).
+  `strerror_r` is then the GNU one, which `error_text` already
+  handled (Phase 2).
+- Found on Linux (throwaway programs and the tests):
+  - A blocking `connect` to a loopback listener completes from the
+    backlog before anything accepts, so one program can connect to its
+    own listener and accept afterwards (`TestErrors` does).
+  - With no descriptor free, `accept4` fails with `EMFILE` and the
+    connection stays queued: it was accepted once a descriptor was
+    freed (I/O; `TooManyFiles`).
+  - valgrind 3.27.1 reports a lowered `RLIMIT_NOFILE` back through
+    `getrlimit` but doesn't enforce it: descriptors went on being made
+    past it, so the `EMFILE` check never saw `EMFILE` and the blocking
+    `Accept` after it waited for ever. Hence the check runs in a child
+    program, which valgrind doesn't follow (Testing).
+- `make test` and `make valgrind` pass, with no leak and no descriptor
+  left open.
 
 ### Phase 4: non-blocking and `SocketTasks`
 

@@ -1,13 +1,12 @@
-MODULE TestAddress; (* Errors, addresses, Resolve and Pair (Phase 2) *)
+MODULE TestAddress; (* Errors, addresses, Resolve, Pair and Listen *)
 
-(* The parts of TestAddress that need no listening socket (PLAN.md,
-   "Testing"): Resolve's text for both families and its errors, Pair,
-   LocalAddress and PeerAddress on a pair, Close. Listening joins in
-   Phase 3. No name server is needed: the hosts are numeric, localhost,
-   the empty host, and nonexistent.invalid, which RFC 6761 guarantees
-   never resolves. *)
+(* PLAN.md, "Testing": Resolve's text for both families and its errors,
+   Pair, LocalAddress and PeerAddress on a pair, Close; Listen on
+   127.0.0.1, ::1, localhost and the empty host with port 0. No name
+   server is needed: the hosts are numeric, localhost, the empty host,
+   and nonexistent.invalid, which RFC 6761 guarantees never resolves. *)
 
-IMPORT SYSTEM, Platform, Sockets, Check;
+IMPORT SYSTEM, Platform, Sockets, Check, TestHelp;
 
 VAR
   addrs: ARRAY 8 OF Sockets.Address;
@@ -19,6 +18,8 @@ VAR
   long: ARRAY 600 OF CHAR;
   buf: ARRAY 8 OF CHAR;
   got: LONGINT;
+  ls: ARRAY 8 OF Sockets.Socket;
+  fds0: INTEGER;
 
 PROCEDURE StartsWith(s, prefix: ARRAY OF CHAR): BOOLEAN;
   VAR i: LONGINT;
@@ -37,6 +38,33 @@ BEGIN
   i := 0; WHILE (i < LEN(s)) & (s[i] # 0X) DO INC(i) END;
   RETURN i
 END Length;
+
+PROCEDURE CloseAll(VAR ls: ARRAY OF Sockets.Socket; n: INTEGER);
+  VAR i: INTEGER;
+BEGIN
+  FOR i := 0 TO n - 1 DO Sockets.Close(ls[i]) END
+END CloseAll;
+
+(* Whether ls[0..n-1] are listening, blocking, of distinct families, all
+   on one nonzero port, with their local addresses' hosts among
+   hosts4/hosts6 (by family). *)
+PROCEDURE Listening(VAR ls: ARRAY OF Sockets.Socket; n: INTEGER;
+    host4, host6: ARRAY OF CHAR): BOOLEAN;
+  VAR i, port: INTEGER; a: Sockets.Address; err: Sockets.Error;
+    ok: BOOLEAN; seen: SET;
+BEGIN
+  ok := n >= 1; port := -1; seen := {};
+  FOR i := 0 TO n - 1 DO
+    ok := ok & ls[i].listening & ~ls[i].nonBlocking & (ls[i].fd >= 0)
+      & ~(ls[i].family IN seen) & Sockets.LocalAddress(ls[i], a, err)
+      & (a.family = ls[i].family) & (a.port > 0)
+      & ((port = -1) OR (a.port = port))
+      & ((a.family = Sockets.inet) & (a.host = host4)
+         OR (a.family = Sockets.inet6) & (a.host = host6));
+    INCL(seen, ls[i].family); port := a.port
+  END;
+  RETURN ok
+END Listening;
 
 BEGIN
   (* The errno values come from the C part, so they are the system's. *)
@@ -120,6 +148,44 @@ BEGIN
   Sockets.Close(s);
   Check.Check(s.fd = -1, "Close on a closed socket does nothing");
   Sockets.Close(t);
+
+  (* Listen, port 0: the kernel's port, the same for every listener *)
+  fds0 := TestHelp.OpenFds();
+  ok := Sockets.Listen("127.0.0.1", 0, 5, FALSE, ls, n, err);
+  Check.Check(ok & (n = 1) & (ls[0].family = Sockets.inet)
+    & Listening(ls, n, "127.0.0.1", ""), "Listen on 127.0.0.1, port 0");
+  CloseAll(ls, n);
+  ok := Sockets.Listen("::1", 0, 5, FALSE, ls, n, err);
+  IF ~ok & (err.kind = Sockets.system) & ((err.code = Sockets.EADDRNOTAVAIL)
+      OR (err.code = Sockets.EAFNOSUPPORT)) THEN
+    Check.Check(TRUE, "Listen on ::1 skipped: no IPv6 here")
+  ELSE
+    Check.Check(ok & (n = 1) & (ls[0].family = Sockets.inet6)
+      & Listening(ls, n, "", "::1"), "Listen on ::1, port 0");
+    CloseAll(ls, n)
+  END;
+  ok := Sockets.Listen("localhost", 0, 5, FALSE, ls, n, err);
+  Check.Check(ok & Listening(ls, n, "127.0.0.1", "::1"),
+    "Listen on localhost: one listener per address, one port");
+  CloseAll(ls, n);
+  ok := Sockets.Listen("", 0, 5, FALSE, ls, n, err);
+  Check.Check(ok & (n >= 1) & Listening(ls, n, "0.0.0.0", "::"),
+    "Listen on the empty host: the wildcard addresses, one port");
+  CloseAll(ls, n);
+  ok := Sockets.Listen("127.0.0.1", 0, 0, TRUE, ls, n, err);
+  Check.Check(ok & (n = 1) & ls[0].nonBlocking & ls[0].listening,
+    "a non-blocking listener says so");
+  CloseAll(ls, n);
+  ok := Sockets.Listen("nonexistent.invalid", 0, 5, FALSE, ls, n, err);
+  Check.Check(~ok & (n = 0) & (err.kind = Sockets.name)
+    & StartsWith(err.text, "listen on nonexistent.invalid port 0: "),
+    "Listen on a name that doesn't resolve is a name error");
+  ok := Sockets.Listen("192.0.2.1", 0, 5, FALSE, ls, n, err);
+  Check.Check(~ok & (n = 0) & (err.kind = Sockets.system)
+    & (err.code = Sockets.EADDRNOTAVAIL)
+    & StartsWith(err.text, "bind 192.0.2.1 port 0: "),
+    "Listen on an address not this machine's is EADDRNOTAVAIL, saying where");
+  Check.Check(TestHelp.OpenFds() = fds0, "every listener is closed again");
 
   Check.Summary
 END TestAddress.

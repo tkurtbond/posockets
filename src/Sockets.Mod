@@ -12,9 +12,14 @@ MODULE Sockets; (* TCP and Unix-domain sockets for poc *)
    array reaches a ["C"] procedure as its first element's address alone,
    so its length is always passed beside it.
 
+   Every procedure here either never waits or waits in the kernel, and a
+   wait in the kernel stops every task (PLAN.md, "Tasks"); SocketTasks
+   (Phase 4) does the same operations waiting through Tasks.
+
    Phase 2 (PLAN.md, "Roadmap"): errors, addresses, Resolve, Pair, Close,
-   LocalAddress and PeerAddress. Listening and connecting come in
-   Phase 3. *)
+   LocalAddress and PeerAddress. Phase 3: Listen, Accept, Connect,
+   ConnectTo, FinishConnect, Read, Write, WriteAll, Shutdown,
+   SetNonBlocking, Adopt and IgnoreBrokenPipe, for TCP. *)
 
 IMPORT SYSTEM;
 
@@ -33,6 +38,9 @@ CONST
   (* Error.want, when kind = wouldBlock *)
   wantRead* = 1; wantWrite* = 2;
 
+  (* Shutdown's how *)
+  shutRead* = 0; shutWrite* = 1; shutBoth* = 2;
+
   (* Codes of the ASSERTs that catch a programmer's error. poc's ASSERT
      exits with status 10 and prints "assertion failed (n)". *)
   AssertClosed* = 80;      (* a closed socket used, other than by Close *)
@@ -50,6 +58,11 @@ CONST
      interface name (IF_NAMESIZE, 16). *)
   HostLen = 128;
   TextLen = 256;           (* Error.text's size *)
+
+  (* The C part's results beside 0 and errno values: a non-blocking call
+     needs a wait; Listen found more addresses than its array holds. *)
+  WouldBlock = -1;
+  TooMany = 99;
 
 TYPE
   Socket* = POINTER TO SocketDesc;
@@ -102,6 +115,33 @@ PROCEDURE ["C", "Sockets.-resolve"] CResolve(host: ARRAY OF CHAR;
   VAR families: ARRAY OF SYSTEM.INT32; VAR hosts: ARRAY OF CHAR;
   stride: SYSTEM.ADDRESS; VAR ports: ARRAY OF SYSTEM.INT32;
   max: SYSTEM.INT32; VAR count, code: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-listen"] CListen(host: ARRAY OF CHAR;
+  hostLen: SYSTEM.ADDRESS; port, backlog, nonBlocking: SYSTEM.INT32;
+  VAR fds: ARRAY OF SYSTEM.INT64; VAR families: ARRAY OF SYSTEM.INT32;
+  max: SYSTEM.INT32; VAR count, code: SYSTEM.INT32;
+  VAR what: ARRAY OF CHAR; whatLen: SYSTEM.ADDRESS): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-accept"] CAccept(fd: SYSTEM.INT64;
+  nonBlocking: SYSTEM.INT32; VAR newFd: SYSTEM.INT64;
+  VAR family: SYSTEM.INT32; VAR host: ARRAY OF CHAR;
+  hostLen: SYSTEM.ADDRESS; VAR port: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-connect"] CConnect(host: ARRAY OF CHAR;
+  hostLen: SYSTEM.ADDRESS; port: SYSTEM.INT32; VAR fd: SYSTEM.INT64;
+  VAR family, code: SYSTEM.INT32;
+  VAR what: ARRAY OF CHAR; whatLen: SYSTEM.ADDRESS): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-connect-to"] CConnectTo(host: ARRAY OF CHAR;
+  hostLen: SYSTEM.ADDRESS; port, nonBlocking: SYSTEM.INT32;
+  VAR fd: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-finish-connect"] CFinishConnect(fd: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-recv"] CRecv(fd: SYSTEM.INT64; buf: SYSTEM.ADDRESS;
+  pos, len: SYSTEM.INT64; VAR n: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-send"] CSend(fd: SYSTEM.INT64; buf: SYSTEM.ADDRESS;
+  pos, len: SYSTEM.INT64; VAR n: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-shutdown"] CShutdown(fd: SYSTEM.INT64; how: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-set-nonblocking"] CSetNonBlocking(fd: SYSTEM.INT64;
+  on: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-adopt"] CAdopt(fd: SYSTEM.INT64;
+  VAR family, listening, nonBlocking: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-ignore-sigpipe"] CIgnoreSigpipe(): SYSTEM.INT32;
 
 (* Text building, for an Error's prefix *)
 
@@ -152,6 +192,48 @@ BEGIN
   s.nonBlocking := FALSE; s.deadline := 0; s.waiters := 0;
   RETURN s
 END NewSocket;
+
+PROCEDURE Flag(b: BOOLEAN): SYSTEM.INT32;
+BEGIN
+  IF b THEN RETURN 1 ELSE RETURN 0 END
+END Flag;
+
+PROCEDURE SetWouldBlock(VAR err: Error; want: INTEGER);
+BEGIN
+  err.kind := wouldBlock; err.want := want; err.code := 0;
+  err.text := "operation would block"
+END SetWouldBlock;
+
+(* The result of a C call on a socket: TRUE for 0; otherwise err is set,
+   a wouldBlock waiting for want, or a system error saying what. *)
+PROCEDURE Outcome(r: SYSTEM.INT32; want: INTEGER; what: ARRAY OF CHAR;
+    VAR err: Error): BOOLEAN;
+BEGIN
+  IF r = 0 THEN RETURN TRUE
+  ELSIF r = WouldBlock THEN SetWouldBlock(err, want)
+  ELSE SetError(err, system, r, what)
+  END;
+  RETURN FALSE
+END Outcome;
+
+PROCEDURE CheckPort(port: INTEGER);
+BEGIN
+  ASSERT((port >= 0) & (port <= 65535), AssertArgument)
+END CheckPort;
+
+(* Halts unless s is open and connected: not closed, not listening. *)
+PROCEDURE CheckStream(s: Socket);
+BEGIN
+  ASSERT(s.fd # -1, AssertClosed);
+  ASSERT(~s.listening, AssertListening)
+END CheckStream;
+
+(* Halts unless buf[pos..pos+len-1] is inside buf. *)
+PROCEDURE CheckRange(bufLen, pos, len: LONGINT);
+BEGIN
+  ASSERT((pos >= 0) & (len >= 0) & (pos <= bufLen) & (len <= bufLen - pos),
+    AssertRange)
+END CheckRange;
 
 (* Closes s and sets s.fd to -1; does nothing if it is already closed,
    so it is safe to call twice. Halts (AssertWaiting) while a
@@ -231,7 +313,7 @@ PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER;
     what: ARRAY 512 OF CHAR;
     ok: BOOLEAN;
 BEGIN
-  ASSERT((port >= 0) & (port <= 65535), AssertArgument);
+  CheckPort(port);
   ClearError(err); n := 0;
   NEW(families, LEN(addrs)); NEW(ports, LEN(addrs));
   NEW(hosts, LEN(addrs) * HostLen);
@@ -255,6 +337,245 @@ BEGIN
   END;
   RETURN ok
 END Resolve;
+
+(* Listening and connecting (TCP) *)
+
+(* Listening TCP sockets on host's addresses and port, one per address
+   (getaddrinfo with AI_PASSIVE), into listeners[0..n-1]. The empty host
+   is every address of both families, as two listeners (0.0.0.0 and ::).
+   Each has SO_REUSEADDR, an IPv6 one IPV6_V6ONLY, so the two families
+   never share a socket. Port 0 gives them all the same port, the
+   kernel's choice (LocalAddress reads it). For the empty host only, a
+   family the machine can't have (IPv6 disabled) is skipped; any other
+   failure closes what was made and is reported. The sockets are
+   blocking unless nonBlocking. Halts (AssertArgument) for a port outside
+   0..65535, a negative backlog, or listeners too small for every
+   address (two suffices for every host but a name with many addresses). *)
+PROCEDURE Listen*(host: ARRAY OF CHAR; port, backlog: INTEGER;
+    nonBlocking: BOOLEAN; VAR listeners: ARRAY OF Socket; VAR n: INTEGER;
+    VAR err: Error): BOOLEAN;
+  VAR
+    fds: POINTER TO ARRAY OF SYSTEM.INT64;
+    families: POINTER TO ARRAY OF SYSTEM.INT32;
+    count, code, kind: SYSTEM.INT32;
+    i: INTEGER;
+    what: ARRAY 512 OF CHAR;
+BEGIN
+  CheckPort(port); ASSERT(backlog >= 0, AssertArgument);
+  ClearError(err); n := 0;
+  NEW(fds, LEN(listeners)); NEW(families, LEN(listeners));
+  what[0] := 0X;
+  kind := CListen(host, LEN(host), port, backlog, Flag(nonBlocking), fds^,
+    families^, SHORT(LEN(listeners)), count, code, what, LEN(what));
+  ASSERT(kind # TooMany, AssertArgument);
+  IF kind # 0 THEN
+    IF kind = name THEN
+      what := "listen on "; Append(what, host); Append(what, " port ");
+      AppendInt(what, port)
+    END;
+    SetError(err, kind, code, what); RETURN FALSE
+  END;
+  FOR i := 0 TO count - 1 DO
+    listeners[i] := NewSocket(SYSTEM.VAL(LONGINT, fds[i]), families[i]);
+    listeners[i].listening := TRUE; listeners[i].nonBlocking := nonBlocking
+  END;
+  n := count;
+  RETURN TRUE
+END Listen;
+
+(* A connection from listener l's queue, as s, with its peer's address.
+   On a blocking listener it waits for one; on a non-blocking one it
+   gives wouldBlock (want = wantRead) when none is queued. s is blocking
+   unless nonBlocking, whatever l is. A client that gave up while queued
+   is skipped, never reported. EMFILE and ENFILE are reported: the
+   connection stays queued, so a caller that retries at once spins; back
+   off first. Halts (AssertListening) unless l is listening. *)
+PROCEDURE Accept*(l: Socket; nonBlocking: BOOLEAN; VAR s: Socket;
+    VAR peer: Address; VAR err: Error): BOOLEAN;
+  VAR fd: SYSTEM.INT64; family, port, r: SYSTEM.INT32;
+BEGIN
+  ASSERT(l.fd # -1, AssertClosed); ASSERT(l.listening, AssertListening);
+  ClearError(err); s := NIL;
+  r := CAccept(l.fd, Flag(nonBlocking), fd, family, peer.host, LEN(peer.host),
+    port);
+  IF ~Outcome(r, wantRead, "accept", err) THEN
+    peer.family := 0; peer.host[0] := 0X; peer.port := 0; RETURN FALSE
+  END;
+  peer.family := family; peer.port := port;
+  s := NewSocket(SYSTEM.VAL(LONGINT, fd), family);
+  s.nonBlocking := nonBlocking;
+  RETURN TRUE
+END Accept;
+
+(* A blocking TCP connection to host and port, as s: each of host's
+   addresses in getaddrinfo's order until one connects, reporting the
+   last error ("connect to 127.0.0.1 port 7: Connection refused"). Waits
+   for the kernel to give up on an address that doesn't answer (about
+   two minutes on Linux), with every task stopped; SocketTasks.Connect
+   has deadlines. Halts (AssertArgument) for a port outside 0..65535. *)
+PROCEDURE Connect*(host: ARRAY OF CHAR; port: INTEGER; VAR s: Socket;
+    VAR err: Error): BOOLEAN;
+  VAR fd: SYSTEM.INT64; family, code, kind: SYSTEM.INT32;
+    what: ARRAY 512 OF CHAR;
+BEGIN
+  CheckPort(port);
+  ClearError(err); s := NIL; what[0] := 0X;
+  kind := CConnect(host, LEN(host), port, fd, family, code, what, LEN(what));
+  IF kind # 0 THEN
+    IF kind = name THEN
+      what := "connect to "; Append(what, host); Append(what, " port ");
+      AppendInt(what, port)
+    END;
+    SetError(err, kind, code, what); RETURN FALSE
+  END;
+  s := NewSocket(SYSTEM.VAL(LONGINT, fd), family);
+  RETURN TRUE
+END Connect;
+
+(* A TCP connection to one address, as Resolve gives it. Blocking unless
+   nonBlocking; then it may give wouldBlock (want = wantWrite) with s
+   made and the connection in progress: wait until s is writable, then
+   call FinishConnect. It may also connect at once, as to a loopback
+   address, and return TRUE. On any other failure s is NIL. Halts
+   (AssertArgument) for an address that isn't inet or inet6. *)
+PROCEDURE ConnectTo*(a: Address; nonBlocking: BOOLEAN; VAR s: Socket;
+    VAR err: Error): BOOLEAN;
+  VAR fd: SYSTEM.INT64; r: SYSTEM.INT32; what: ARRAY 256 OF CHAR;
+BEGIN
+  ASSERT((a.family = inet) OR (a.family = inet6), AssertArgument);
+  CheckPort(a.port);
+  ClearError(err); s := NIL;
+  r := CConnectTo(a.host, LEN(a.host), a.port, Flag(nonBlocking), fd);
+  IF (r = 0) OR (r = WouldBlock) THEN
+    s := NewSocket(SYSTEM.VAL(LONGINT, fd), a.family);
+    s.nonBlocking := nonBlocking
+  END;
+  what := "connect to "; Append(what, a.host); Append(what, " port ");
+  AppendInt(what, a.port);
+  RETURN Outcome(r, wantWrite, what, err)
+END ConnectTo;
+
+(* The outcome of a non-blocking ConnectTo, once s is writable: TRUE if
+   connected, a system error if the connection failed (ECONNREFUSED), or
+   wouldBlock (want = wantWrite) if it is still in progress. *)
+PROCEDURE FinishConnect*(s: Socket; VAR err: Error): BOOLEAN;
+BEGIN
+  CheckStream(s); ClearError(err);
+  RETURN Outcome(CFinishConnect(s.fd), wantWrite, "connect", err)
+END FinishConnect;
+
+(* I/O *)
+
+(* Up to len bytes from s into buf[pos..pos+len-1], n of them. A read of
+   fewer than len is normal. The peer having closed its side gives
+   kind = closed; a non-blocking socket with nothing to read gives
+   wouldBlock (want = wantRead). len = 0 returns TRUE at once with n = 0.
+   Halts (AssertRange) for a range outside buf. *)
+PROCEDURE Read*(s: Socket; VAR buf: ARRAY OF CHAR; pos, len: LONGINT;
+    VAR n: LONGINT; VAR err: Error): BOOLEAN;
+  VAR got: SYSTEM.INT64; r: SYSTEM.INT32;
+BEGIN
+  CheckStream(s); CheckRange(LEN(buf), pos, len);
+  ClearError(err); n := 0;
+  IF len = 0 THEN RETURN TRUE END;
+  r := CRecv(s.fd, SYSTEM.ADR(buf[0]), pos, len, got);
+  IF ~Outcome(r, wantRead, "recv", err) THEN RETURN FALSE END;
+  n := SYSTEM.VAL(LONGINT, got);
+  IF n = 0 THEN
+    err.kind := closed; err.text := "connection closed by peer"; RETURN FALSE
+  END;
+  RETURN TRUE
+END Read;
+
+(* Up to len bytes of buf[pos..pos+len-1] to s, n of them; fewer than
+   len is normal (WriteAll loops). A peer that has gone gives a system
+   error, EPIPE or ECONNRESET, never a SIGPIPE. A non-blocking socket
+   whose buffer is full gives wouldBlock (want = wantWrite). Halts
+   (AssertRange) for a range outside buf. *)
+PROCEDURE Write*(s: Socket; buf-: ARRAY OF CHAR; pos, len: LONGINT;
+    VAR n: LONGINT; VAR err: Error): BOOLEAN;
+  VAR sent: SYSTEM.INT64; r: SYSTEM.INT32;
+BEGIN
+  CheckStream(s); CheckRange(LEN(buf), pos, len);
+  ClearError(err); n := 0;
+  IF len = 0 THEN RETURN TRUE END;
+  r := CSend(s.fd, SYSTEM.ADR(buf[0]), pos, len, sent);
+  IF ~Outcome(r, wantWrite, "send", err) THEN RETURN FALSE END;
+  n := SYSTEM.VAL(LONGINT, sent);
+  RETURN TRUE
+END Write;
+
+(* All of buf[pos..pos+len-1] to s, looping over short writes; n is what
+   was written, which is len unless it fails. On a non-blocking socket
+   it stops with wouldBlock when the buffer fills, and n says how far it
+   got, so the caller can wait and resume at pos + n. *)
+PROCEDURE WriteAll*(s: Socket; buf-: ARRAY OF CHAR; pos, len: LONGINT;
+    VAR n: LONGINT; VAR err: Error): BOOLEAN;
+  VAR k: LONGINT;
+BEGIN
+  CheckStream(s); CheckRange(LEN(buf), pos, len);
+  ClearError(err); n := 0;
+  WHILE n < len DO
+    IF ~Write(s, buf, pos + n, len - n, k, err) THEN RETURN FALSE END;
+    n := n + k
+  END;
+  RETURN TRUE
+END WriteAll;
+
+(* Shuts down s's reading (shutRead), writing (shutWrite) or both sides.
+   shutWrite sends the peer end of stream, so its Read gives closed,
+   while s can still read what the peer sends. Halts (AssertArgument) for
+   another how. *)
+PROCEDURE Shutdown*(s: Socket; how: INTEGER; VAR err: Error): BOOLEAN;
+BEGIN
+  CheckStream(s);
+  ASSERT((how >= shutRead) & (how <= shutBoth), AssertArgument);
+  ClearError(err);
+  RETURN Outcome(CShutdown(s.fd, how), 0, "shutdown", err)
+END Shutdown;
+
+(* Sets (on) or clears O_NONBLOCK on s. *)
+PROCEDURE SetNonBlocking*(s: Socket; on: BOOLEAN; VAR err: Error): BOOLEAN;
+BEGIN
+  ASSERT(s.fd # -1, AssertClosed);
+  ClearError(err);
+  IF ~Outcome(CSetNonBlocking(s.fd, Flag(on)), 0, "fcntl", err) THEN
+    RETURN FALSE
+  END;
+  s.nonBlocking := on;
+  RETURN TRUE
+END SetNonBlocking;
+
+(* Wraps fd, a stream socket made elsewhere (inherited from a parent, or
+   from systemd's socket activation), as s, taking its family, whether it
+   is listening, and its mode from the kernel. s then owns fd: Close
+   closes it. A descriptor that isn't a socket is a system error
+   (ENOTSOCK), as is one that isn't a stream socket (EPROTOTYPE); fd is
+   left open then. Halts (AssertArgument) for a negative fd. *)
+PROCEDURE Adopt*(fd: LONGINT; VAR s: Socket; VAR err: Error): BOOLEAN;
+  VAR family, listening, nonBlocking, r: SYSTEM.INT32;
+BEGIN
+  ASSERT(fd >= 0, AssertArgument);
+  ClearError(err); s := NIL;
+  r := CAdopt(fd, family, listening, nonBlocking);
+  IF ~Outcome(r, 0, "adopt", err) THEN RETURN FALSE END;
+  s := NewSocket(fd, family);
+  s.listening := listening # 0; s.nonBlocking := nonBlocking # 0;
+  RETURN TRUE
+END Adopt;
+
+(* Sets SIGPIPE to ignored, process-wide. posockets' own writes never
+   raise it (send with MSG_NOSIGNAL); this is for writes made elsewhere
+   on its descriptors, as libtls's through OpenSSL. An ignored signal
+   stays ignored across exec, so every child started afterwards
+   (Platform.System) inherits it, and a pipeline in such a child, such as
+   "yes | head", may never end. *)
+PROCEDURE IgnoreBrokenPipe*;
+  VAR r: SYSTEM.INT32;
+BEGIN
+  (* sigaction fails only for a bad signal number or action. *)
+  r := CIgnoreSigpipe()
+END IgnoreBrokenPipe;
 
 BEGIN
   ECONNREFUSED := CErrnoValue(0); ECONNRESET := CErrnoValue(1);

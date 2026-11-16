@@ -49,11 +49,14 @@ POCBIN := $(shell command -v $(POC))
 # The modules and their C parts, whichever have one.
 LIBSRC := $(LIBMODS:%=src/%.Mod) $(wildcard $(LIBMODS:%=src/%.c))
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestAddress
+TESTS := TestAddress TestBlocking TestErrors
+# Programs the tests start (test/<name>.Mod), not tests themselves.
+HELPERS := BlockingPeer TooManyFiles
 # Programs that must halt (test/<name>.Mod), as name:Assert-code. poc's
 # ASSERT(x, n) prints "assertion failed (n)" on standard error and exits
 # with status 10, so `make test` requires both.
-HALTTESTS := HaltClosed:80 HaltPort:84 HaltAddrs:84
+HALTTESTS := HaltClosed:80 HaltPort:84 HaltAddrs:84 HaltRange:81 HaltListening:85 \
+  HaltAccept:85 HaltBacklog:84 HaltListeners:84 HaltShutdown:84
 ASSERTSTATUS := 10
 
 # Example programs (examples/<name>.Mod), as name:required-exit-status.
@@ -62,6 +65,7 @@ ASSERTSTATUS := 10
 EXAMPLES :=
 
 TESTBINS := $(TESTS:%=$(BUILD)/%)
+HELPERBINS := $(HELPERS:%=$(BUILD)/%)
 HALTBINS := $(foreach h,$(HALTTESTS),$(BUILD)/$(firstword $(subst :, ,$(h))))
 EXAMPLEBINS := $(foreach e,$(EXAMPLES),$(BUILD)/$(firstword $(subst :, ,$(e))))
 
@@ -70,7 +74,7 @@ EXAMPLEBINS := $(foreach e,$(EXAMPLES),$(BUILD)/$(firstword $(subst :, ,$(e))))
 
 all: tests
 
-tests: $(TESTBINS) $(HALTBINS) $(EXAMPLEBINS)
+tests: $(TESTBINS) $(HELPERBINS) $(HALTBINS) $(EXAMPLEBINS)
 
 $(BUILD):
 	mkdir -p $@
@@ -81,7 +85,10 @@ $(LIBDIR)/$(LIBRARY)-%.stamp: $(LIBSRC) $(POCBIN) | $(BUILD)
 	  -library $(LIBRARY) $(LIBMODS:%=%.Mod)
 	touch $@
 
-$(BUILD)/Test%: test/Test%.Mod test/Check.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
+$(BUILD)/Test%: test/Test%.Mod test/Check.Mod test/TestHelp.Mod test/TestHelp.c $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
+	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -import-path test -output-dir $(BUILD) -o $@ $<
+
+$(HELPERBINS): $(BUILD)/%: test/%.Mod test/TestHelp.Mod test/TestHelp.c $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
 	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -import-path test -output-dir $(BUILD) -o $@ $<
 
 $(BUILD)/Halt%: test/Halt%.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
