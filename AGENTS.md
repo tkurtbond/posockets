@@ -31,8 +31,8 @@ behaviour of poc that applies here unchanged:
 ## Status
 
 As of 2026-11-15, Phases 1 (the skeleton), 2 (errors and addresses),
-3 (blocking TCP), 4 (`SocketTasks`), 5 (deadlines) and 6 (Unix-domain
-sockets) are done: the
+3 (blocking TCP), 4 (`SocketTasks`), 5 (deadlines), 6 (Unix-domain
+sockets) and 8 (examples and documentation) are done: the
 build, the test and valgrind runners, and `Sockets` with its C part:
 `Error`, `Address`, `Resolve`, `Pair`, `Close`, `LocalAddress`,
 `PeerAddress`, `Listen`, `Accept`, `Connect`, `ConnectTo`,
@@ -42,7 +42,10 @@ build, the test and valgrind runners, and `Sockets` with its C part:
 `ConnectUnix`; and `SocketTasks`: `Accept`, `Connect`, `ConnectTo`,
 `ConnectUnix` (all three with a time limit), `Read`,
 `Write`, `WriteAll`, `LingeringClose`, waiting through `Tasks` until
-the socket's deadline. Next is Phase 7, socket options.
+the socket's deadline; the examples `EchoServer`, `EchoClient`,
+`Netcat`, `Forward` and `FileServer`, each tested from outside; and the
+reference in `doc/`. Phase 7, socket options, waits for a user to ask
+for one; next is Phase 9, the BSD port.
 
 **Phase 5 needs a poc newer than 0.12.0** (`Tasks.AwaitReadableFor`,
 Peaseblossom commit 73109d2, in no release yet). Until the next
@@ -136,8 +139,24 @@ descriptor check only.
   that the library doesn't offer (a `poll` with a timeout, `SO_LINGER`
   0, small socket buffers, the descriptor limit and count). Helper programs a test runs as a
   child (`BlockingPeer`, `TooManyFiles`) are listed in `HELPERS` and
-  built into `build/` before the tests. `examples/` (Phase 8): as
-  polibfyaml's.
+  built into `build/` before the tests. `Run.Mod`: starts a program
+  in the background, its output in `build/`, reads the port a server
+  prints first, and waits for its exit status; `TestEcho`,
+  `TestNetcat`, `TestForward` and `TestFileServer` use it to drive the
+  examples, with the other side as tasks in the test.
+- `examples/`: `EchoServer`, `EchoClient`, `Netcat`, `Forward`,
+  `FileServer` (PLAN.md, Phase 8), listed in `EXAMPLEPROGS` and built
+  before the tests against the library in `build/`. Each server prints
+  `port <n>` as its first line and takes a count of connections to
+  serve before exiting. `EXAMPLES` (programs compared with an
+  `.expected` file) is empty.
+- `doc/`: `Sockets.md` and `SocketTasks.md`, the reference, made by
+  `doc/mkref.py` from the source with `make doc` and committed. Edit
+  the comments in `src/`, never the `.md`; run `make doc` after
+  changing an exported declaration or its comment. mkref.py reads the
+  layout the sources keep (a comment just above each declaration,
+  procedures grouped under one-line `(* Heading *)` comments), not
+  Oberon in general.
 - `build/`: poc and clang output, and the tests' Unix-domain sockets
   (gitignored).
 - `PLAN.md`: design, decisions, confirmed findings and open questions,
@@ -269,6 +288,14 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   `EADDRINUSE`. An accepted unnamed peer comes back with an empty host.
 - **`TestUnix` puts its socket files in `../build`** (tests run from
   `test/`) and removes them, before and after, with `Platform.Unlink`.
+- **A `Close` with unread data from the peer resets the connection,
+  and the peer loses what it hadn't read yet**: `FileServer`, closing
+  after reading only a request's head, made `TestFileServer`'s client,
+  which had sent 100,000 bytes more, get `recv: Connection reset by
+  peer` instead of the response. `SocketTasks.LingeringClose` fixes it.
+- **poc's `-show-interface` prints a module's declarations without
+  their comments**, so `doc/` is made from the source by `mkref.py`
+  instead.
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 

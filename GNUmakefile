@@ -57,9 +57,9 @@ POCBIN := $(shell command -v $(POC))
 # The modules and their C parts, whichever have one.
 LIBSRC := $(LIBMODS:%=src/%.Mod) $(wildcard $(LIBMODS:%=src/%.c))
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestAddress TestBlocking TestErrors TestTasks TestDeadline TestUnix
+TESTS := TestAddress TestBlocking TestErrors TestTasks TestDeadline TestUnix TestEcho TestNetcat TestForward TestFileServer
 # tests that run tasks (VALGRIND_TASKS)
-TASKTESTS := TestTasks TestDeadline TestUnix
+TASKTESTS := TestTasks TestDeadline TestUnix TestEcho TestNetcat TestForward TestFileServer
 # Programs the tests start (test/<name>.Mod), not tests themselves.
 HELPERS := BlockingPeer TooManyFiles
 # Programs that must halt (test/<name>.Mod), as name:Assert-code. poc's
@@ -73,20 +73,25 @@ ASSERTSTATUS := 10
 
 # Example programs (examples/<name>.Mod), as name:required-exit-status.
 # `make test` runs each from examples/ and requires that status and
-# stdout identical to examples/<name>.expected. None until Phase 8.
+# stdout identical to examples/<name>.expected. None so far: the examples
+# below don't end by themselves.
 EXAMPLES :=
+# Example programs (examples/<name>.Mod) that a test starts and drives
+# from the other side (PLAN.md, Phase 8), built before the tests run.
+EXAMPLEPROGS := EchoServer EchoClient Netcat Forward FileServer
 
 TESTBINS := $(TESTS:%=$(BUILD)/%)
 HELPERBINS := $(HELPERS:%=$(BUILD)/%)
 HALTBINS := $(foreach h,$(HALTTESTS),$(BUILD)/$(firstword $(subst :, ,$(h))))
 EXAMPLEBINS := $(foreach e,$(EXAMPLES),$(BUILD)/$(firstword $(subst :, ,$(e))))
+EXAMPLEPROGBINS := $(EXAMPLEPROGS:%=$(BUILD)/%)
 
-.PHONY: all tests test valgrind clean install uninstall
+.PHONY: all tests test valgrind clean install uninstall doc
 .NOTPARALLEL:
 
 all: tests
 
-tests: $(TESTBINS) $(HELPERBINS) $(HALTBINS) $(EXAMPLEBINS)
+tests: $(TESTBINS) $(HELPERBINS) $(HALTBINS) $(EXAMPLEBINS) $(EXAMPLEPROGBINS)
 
 $(BUILD):
 	mkdir -p $@
@@ -97,7 +102,7 @@ $(LIBDIR)/$(LIBRARY)-%.stamp: $(LIBSRC) $(POCBIN) | $(BUILD)
 	  -library $(LIBRARY) $(LIBMODS:%=%.Mod)
 	touch $@
 
-$(BUILD)/Test%: test/Test%.Mod test/Check.Mod test/TestHelp.Mod test/TestHelp.c $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
+$(BUILD)/Test%: test/Test%.Mod test/Check.Mod test/TestHelp.Mod test/TestHelp.c test/Run.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
 	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -import-path test -output-dir $(BUILD) -o $@ $<
 
 $(HELPERBINS): $(BUILD)/%: test/%.Mod test/TestHelp.Mod test/TestHelp.c $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
@@ -107,6 +112,9 @@ $(BUILD)/Halt%: test/Halt%.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
 	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -output-dir $(BUILD) -o $@ $<
 
 $(BUILD)/Example%: examples/Example%.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
+	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -output-dir $(BUILD) -o $@ $<
+
+$(EXAMPLEPROGBINS): $(BUILD)/%: examples/%.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
 	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -output-dir $(BUILD) -o $@ $<
 
 # Run every test from test/; report all, fail at the end if any failed.
@@ -186,6 +194,15 @@ uninstall:
 	done; \
 	rmdir $(POCLIBDIR)/$$triple 2>/dev/null || :; \
 	rmdir $(POCLIBDIR) 2>/dev/null || :
+
+# The reference in doc/, from each module's exported declarations and
+# their comments. Its output is committed, so a reader needs no build.
+DOCS := $(patsubst %,doc/%.md,$(LIBMODS))
+
+doc: $(DOCS)
+
+doc/%.md: src/%.Mod doc/mkref.py
+	python3 doc/mkref.py $< > $@
 
 clean:
 	rm -rf $(BUILD)

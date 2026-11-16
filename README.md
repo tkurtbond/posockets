@@ -20,15 +20,16 @@ It is planned to offer:
 - errors from the network or the system returned as a result, never a
   halt.
 
-**Status: early.** Phases 1 to 6 of [PLAN.md](PLAN.md) are done:
+**Status: early.** Phases 1 to 6 and 8 of [PLAN.md](PLAN.md) are done:
 the build and tests, errors, addresses as text, resolving names, socket
 pairs, and blocking TCP over IPv4 and IPv6 (`Listen`, `Accept`,
 `Connect`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Close`), with
 non-blocking sockets, and `SocketTasks`, which waits through poc's
 `Tasks` so one thread serves many connections, with deadlines on its
 waits, time limits on connecting, and a lingering close; and
-Unix-domain stream sockets (`ListenUnix`, `ConnectUnix`). Socket
-options come next. PLAN.md has the design and the
+Unix-domain stream sockets (`ListenUnix`, `ConnectUnix`); and
+examples and a reference. Socket options wait for a program that needs
+them; the BSD port comes next. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 ## Requirements
@@ -76,8 +77,66 @@ Two things a program using `SocketTasks` meets that come from poc's
 - **The peer of an accepted connection is usually unnamed**: its
   address has family `unix` and an empty host.
 
-The comments in `src/Sockets.Mod` and `src/SocketTasks.Mod` are the
-reference for each procedure.
+## Reference
+
+[doc/Sockets.md](doc/Sockets.md) and
+[doc/SocketTasks.md](doc/SocketTasks.md) describe every exported
+constant, type and procedure. They are made from the comments in
+`src/Sockets.Mod` and `src/SocketTasks.Mod` by `make doc`, so the
+source and the reference say the same thing.
+
+## Examples
+
+`make` builds these into `build/`, and `make test` runs each against
+a peer of its own. A server prints `port <n>` as its first line, so
+port 0 (one the kernel chooses) is easy to use; with a count, it serves
+that many connections and exits, and without one it serves until
+killed.
+
+- **`EchoServer port [count [idle-ms]]`** sends back what each client
+  sends, one task per connection, and closes a client silent for idle
+  ms (default 30000). **`EchoClient host port word...`** is the
+  smallest client: blocking calls only.
+
+  ```sh
+  build/EchoServer 7000 &
+  build/EchoClient localhost 7000 hello there
+  ```
+
+- **`Netcat`** copies standard input to a connection and the
+  connection to standard output, ending its side when standard input
+  ends: `Netcat host port`, `Netcat -U path`, or listening for one
+  connection, `Netcat -l host port` and `Netcat -l -U path`.
+
+  ```sh
+  build/Netcat -l -U /run/user/$UID/demo.sock > got &
+  build/Netcat -U /run/user/$UID/demo.sock < some-file
+  ```
+
+- **`Forward port host target-port [count [idle-ms]]`** forwards each
+  connection on port to host and target-port, two tasks per connection
+  copying each way, and closes a connection that has been idle both
+  ways for idle ms (default 300000).
+
+  ```sh
+  build/Forward 8080 example.org 80 &
+  curl -H 'Host: example.org' http://localhost:8080/
+  ```
+
+- **`FileServer port dir [count [timeout-ms]]`** serves the files in
+  dir over HTTP/1.0: `GET` and `HEAD`, a few content types by
+  extension, a path ending in `/` giving its `index.html`, and 400,
+  404 and 405 for the rest. It refuses `..`, and drops a client that
+  sends no request within the timeout (default 10000 ms). It is a
+  demonstration, not for the open internet: it follows symbolic links
+  and has no limit on connections.
+
+  ```sh
+  build/FileServer 8000 ~/public_html &
+  curl -i http://localhost:8000/index.html
+  ```
+
+The comment at the top of each example says what it shows.
 
 ## Building
 
@@ -86,6 +145,7 @@ make              # build the library in build/lib and the tests
 make test         # run the tests and the halt tests
 make valgrind     # run the tests under valgrind, checking for leaked
                   #   memory and descriptors left open
+make doc          # remake doc/ from the comments in src/
 make install      # install into ~/.local/lib/poc (POCLIBDIR=... to change)
 make uninstall
 make clean

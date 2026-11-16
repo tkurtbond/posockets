@@ -920,7 +920,7 @@ Only those a user asks for: `TCP_NODELAY`, `SO_KEEPALIVE`, buffer
 sizes, `SO_LINGER`. Each a procedure, not a generic `SetOption` taking
 C's numbers.
 
-### Phase 8: examples and documentation
+### Phase 8: examples and documentation [done]
 
 `examples/`: an echo server with `SocketTasks` (one task per
 connection, both families, a deadline) and a blocking client, the
@@ -957,8 +957,59 @@ the port it was given, read back with `LocalAddress`, as its first line,
 so the test can learn it. The test starts the example in the
 background, as `TestBlocking` starts its helper.
 
-A `doc/` reference like polibfyaml's, from the exported declarations and
-their comments.
+A `doc/` reference, from the exported declarations and their comments.
+(This said "like polibfyaml's", but polibfyaml has no `doc/`; its
+reference is its module comments.)
+
+Done 2026-11-15 (with the scratch poc of Phase 5):
+
+- `examples/EchoServer.Mod` (one task per connection, a listener per
+  family, an idle deadline, an accept loop that stops after `count`),
+  `EchoClient.Mod` (blocking only), `Netcat.Mod`, `Forward.Mod` and
+  `FileServer.Mod`, as above. Each server prints `port <n>` first and
+  takes an optional count of connections to serve before exiting, so a
+  test can end it. They are built with the tests (`EXAMPLEPROGS`)
+  against the library in `build/`, as a user's program would be.
+- They are tested from outside: `test/Run.Mod` starts a program in
+  the background with its output in `build/`, reads the port from that
+  output, waits for it to exit and gives its status. `TestEcho`,
+  `TestNetcat` (TCP both ways, Unix-domain, a refused connection, a
+  usage error), `TestForward` (echo through it on both families, a
+  stream quiet one way, a refused onward connection) and
+  `TestFileServer` (`GET`, `HEAD`, 404, `..`, 405, garbage, a silent
+  client, a request followed by more than it reads) run the example's
+  peer as tasks in the test. `EXAMPLES`, the `.expected` runner, stays
+  empty.
+- **An idle limit belongs to the connection, not to each direction.**
+  `Forward` first gave each copying task its own deadline, and a
+  download with nothing sent the other way was cut off after the idle
+  time; `TestForward`'s stream case (a server sending every 100 ms, a
+  client sending nothing, a 500 ms limit) failed that way when the
+  per-direction version was put back as a check. Both tasks wait on
+  both sockets, which have one deadline each, read when a wait starts;
+  so each task sets it from the connection's last transfer
+  (`last + idle - Now`), and on a timeout looks at `last` again before
+  giving up.
+- **Closing with unread data loses the answer.** `FileServer` reads only
+  the request's head; `TestFileServer`'s client, having sent more,
+  got `recv: Connection reset by peer` instead of the response when the server
+  ended with `Close` (checked by putting `Close` back in place of
+  `LingeringClose`). `LingeringClose(s, 2000)` fixes it; the 100,000
+  junk bytes after a `GET` in `TestFileServer` check it.
+- `FileServer` reads the first chunk of the file before it sends the
+  header, so a directory (`EISDIR` on reading) or an unreadable file
+  gets a 404 rather than a 200 with nothing after it (curl
+  on a directory: 404), and sends at
+  most `Content-Length` bytes if the file grows meanwhile.
+- `doc/mkref.py` makes `doc/Sockets.md` and `doc/SocketTasks.md` from
+  the source (`make doc`): the module comment less its "Phase"
+  paragraphs, each exported constant, type, variable and procedure with
+  the comment above it, procedures under the source's one-line section
+  comments. The output is committed so it can be read without
+  building. poc's `-show-interface` prints the declarations but not
+  their comments, so it couldn't be used.
+- `make test` and `make valgrind` pass, the example tests in
+  `TASKTESTS`.
 
 ### Phase 9: BSD port
 

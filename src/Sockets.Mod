@@ -198,6 +198,7 @@ END AppendAddress;
 
 (* Errors *)
 
+(* Sets err to no error: kind = none, an empty text. *)
 PROCEDURE ClearError*(VAR err: Error);
 BEGIN
   err.kind := none; err.want := 0; err.code := 0; err.text[0] := 0X
@@ -621,6 +622,7 @@ BEGIN
   INC(s.waiters)
 END BeginWait;
 
+(* For SocketTasks only: the end of a wait begun with BeginWait. *)
 PROCEDURE EndWait*(s: Socket);
 BEGIN
   DEC(s.waiters)
