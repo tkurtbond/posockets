@@ -439,10 +439,9 @@ is in reach, and it solves stopping a server (Tasks) too.
   A proxy that wants separate limits for reading and writing sets the
   deadline before each call; nothing more is offered until a user
   needs it.
-- Phase 5 depends on the upstream change, which is pushed but in no
-  poc release yet: the installed poc is 0.12.0, so until the next
-  release posockets builds only with a poc built from the Peaseblossom
-  checkout (AGENTS.md, "Build"). Phases 1-4 don't need it, and the
+- Phase 5 depends on the upstream change, released in poc 0.13.0;
+  until that was installed here, posockets was built with a poc built
+  from the Peaseblossom checkout. Phases 1-4 don't need it, and the
   copy `make install` put in `~/.local/lib/poc` on 2026-11-15, for
   polibtls on 0.12.0, is Phase 4's.
 

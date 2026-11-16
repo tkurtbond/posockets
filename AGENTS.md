@@ -48,23 +48,19 @@ the socket's deadline; the examples `EchoServer`, `EchoClient`,
 reference in `doc/`; tested on Linux, FreeBSD, OpenBSD and NetBSD.
 Phase 7, socket options, waits for a user to ask for one.
 
-**Phase 5 needs poc 0.13.0 or later** (`Tasks.AwaitReadableFor`). The
-BSD hosts have 0.13.0; this machine's `/usr/bin/poc` was still 0.12.0
-on 2026-11-15, which fails on `SocketTasks.Mod`, so a poc built from
-the Peaseblossom checkout (`git archive`, so the user's uncommitted
-Peaseblossom tree is never touched) is installed in
-`/usr/local/sw/tmp/claude-posockets-phase5/prefix`; build and test with
-`make test POC=/usr/local/sw/tmp/claude-posockets-phase5/prefix/bin/poc`
-(and `make valgrind POC=...`) until 0.13.0 is installed here. The copy
-in `~/.local/lib/poc`, which polibtls uses, is Phase 4's (commit
-72e218a), installed with 0.12.0; reinstall from this tree only when the
-user says, once polibtls is on 0.13.0.
+**Phase 5 needs poc 0.13.0 or later** (`Tasks.AwaitReadableFor`).
+This machine (atla) and the BSD hosts have 0.13.0, so a plain `make
+test` works; `make test` and `make valgrind` passed with atla's
+`/usr/bin/poc` 0.13.0 on 2026-11-15. The copy in `~/.local/lib/poc`,
+which polibtls uses, is Phase 4's (commit 72e218a), installed with
+0.12.0; reinstall from this tree only when the user says, once
+polibtls is on 0.13.0.
 
 ## Reference material
 
 | What | Where |
 |---|---|
-| poc | installed from the Peaseblossom RPM: `/usr/bin/poc` (0.12.0 on 2026-11-15), its runtime `poc-rtl` under `/usr/lib/poc`; `poc(1)`, `/usr/share/doc/peaseblossom/` |
+| poc | installed from the Peaseblossom RPM: `/usr/bin/poc` (0.13.0 since 2026-11-15), its runtime `poc-rtl` under `/usr/lib/poc`; `poc(1)`, `/usr/share/doc/peaseblossom/` |
 | poc source | `~/Repos/Oberon/Peaseblossom` (`doc/users-guide.md`, `doc/reference-guide.md`, `doc/developer/language-extensions.md`) |
 | poc's runtime | `~/Repos/Oberon/Peaseblossom/rtl/llvm/`: `Platform.Mod`/`.c` (descriptors, `errno`, signals), `Tasks.Mod`, `TaskWaiting.Mod`/`.c` (the `poll` loop), and `doc/developer/tasks.md` (the design of `Tasks`) |
 | Oberon-2 report | `~/Reference/Computer/Languages/Oberon/Oberon2.pdf`; plain text `Oberon2-layout.text`, `Oberon2-no-layout.text` |
