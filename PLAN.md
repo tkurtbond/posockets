@@ -144,7 +144,8 @@ sends RST instead of FIN, and the peer may lose the end of what was
 written to it. A server that ends a response by closing should shut
 down its writing side, read and discard until end of stream or a short
 deadline, then close (the "lingering close"). The Gemini server needs
-this; a `SocketTasks` helper for it is likely (Phase 4).
+this; a `SocketTasks` helper for it is likely (Phase 5: without a
+deadline, a peer that never closes would hold the task for ever).
 
 **No finalizer closes a socket** (decided 2026-11-15). polibtls's
 `Connection` holds only the descriptor, so a `Socket` that became
@@ -512,6 +513,16 @@ valgrind with `poc-gc.supp`, and descriptors counted:
   `build/`.
 - Halt tests for every code in Halt codes.
 
+**A test meant to wait must make the wait happen, and show that it
+did.** The loopback's socket buffers are large: in Phase 4, 300,000
+bytes each way on 20 connections at once never made `send` return
+`EAGAIN`, so `TestTasks` passed without `SocketTasks` ever waiting.
+Asking for buffers of 4096 bytes on both ends
+(`TestHelp.SmallBuffers`) made it wait hundreds of times. A test of
+waiting (Phase 5's deadlines too) uses small buffers, or a peer that
+holds back, and is checked once with `strace -f -e trace=sendto,recvfrom,poll`
+to see the `EAGAIN`s and `poll`s, the count noted here.
+
 Done in Phase 3:
 
 - `test/TestHelp.Mod` and its C part `TestHelp.c`: what the tests need
@@ -554,11 +565,13 @@ Still to confirm:
   any other signal a socket program cares about. (Read 2026-11-15:
   `Platform` installs handlers only for `SIGINT`, `SIGQUIT` and
   `SIGILL`, on request, with `SA_RESTART`, and none for `SIGPIPE`.)
-- Two tasks awaiting one descriptor, one for reading and one for
-  writing; and `POLLHUP`/`POLLERR` waking `AwaitReadable`. (The source
-  says both work; Tasks, above.)
-- `shutdown(SHUT_RDWR)` from one task wakes another awaiting the same
-  descriptor (how one task cuts off another's wait; Shutdown).
+- ~~Two tasks awaiting one descriptor, one for reading and one for
+  writing.~~ Done in Phase 4 (`TestTasks`).
+- `POLLHUP`/`POLLERR` waking `AwaitReadable`. (The source says so;
+  Tasks, above.) End of stream from the peer wakes it (Phase 4);
+  `POLLERR` alone not yet seen.
+- ~~`shutdown(SHUT_RDWR)` from one task wakes another awaiting the same
+  descriptor.~~ Done in Phase 4, on TCP (`TestTasks`).
 - ~~Passing an `ARRAY OF CHAR` host and a `VAR ARRAY OF CHAR` result
   buffer to C, and the C part writing text back with a length limit.~~
   Done in Phase 2: an open array of any mode reaches a `["C"]`
@@ -703,7 +716,7 @@ Done 2026-11-15:
 - `make test` and `make valgrind` pass, with no leak and no descriptor
   left open.
 
-### Phase 4: non-blocking and `SocketTasks`
+### Phase 4: non-blocking and `SocketTasks` [done]
 
 `SetNonBlocking`, the `nonBlocking` argument, `wouldBlock`,
 `FinishConnect`; `SocketTasks`, with `Connect` over `Resolve` and
@@ -711,14 +724,72 @@ Done 2026-11-15:
 `waiters`, `BeginWait`/`EndWait` and halt 86. `TestTasks`. After this
 phase polibtls can start its Phase 5 (TCP); `make install` here first.
 
+Done 2026-11-15:
+
+- `SocketTasks`: `Accept`, `Connect`, `ConnectTo`, `Read`, `Write`,
+  `WriteAll`, each looping over the `Sockets` call and, on
+  `wouldBlock`, `Tasks.AwaitReadable`/`AwaitWritable` on the socket,
+  between `Sockets.BeginWait` and `EndWait`. A blocking socket halts
+  (82); every socket made is non-blocking. `Connect` resolves with
+  `Sockets.Resolve` (which waits in the kernel: Open questions), then
+  `ConnectTo`s each address in turn, reporting the last error; a name
+  that doesn't resolve gives `Resolve`'s text ("resolve ... port
+  ..."), not `Sockets.Connect`'s.
+- `FinishConnect`'s error now names the address ("connect to 127.0.0.1
+  port 7: Connection refused"): a non-blocking `ConnectTo` that is
+  still in progress keeps its address in a private field of the
+  socket until it is finished.
+- `BeginWait`/`EndWait` count waits in `waiters`; `Close` halts (86)
+  while one is going on (`HaltWaiting`). `HaltBlocking` for 82.
+- **The lingering close moved to Phase 5** (decided 2026-11-15): it
+  reads until the peer closes, and without a deadline a peer that never
+  does would hold the task for ever.
+- `TestTasks`: an accept task, an echo task per connection, and 20
+  clients at once, each with a reader and a writer task on one socket,
+  echoing 300,000 bytes. Socket buffers of 4096 bytes asked for
+  (`TestHelp.SmallBuffers`) make the waits happen: with the loopback's
+  own, `send` never once returned `EAGAIN` and the test proved
+  nothing; with them, `strace` counted 176 `EAGAIN`s from `sendto`,
+  1,609 from `recvfrom` and 333 `poll`s. Half the clients connect to
+  `localhost`, which resolves to `::1` first, where nothing listens,
+  so they fall back to `127.0.0.1`. Also: `waiters` while a `Read`
+  waits; `Shutdown(shutBoth)` from another task waking a waiting
+  `Read` with `closed`; a refused `ConnectTo` and its text; a name
+  error from `Connect`. A watchdog task ends the program after 60 s
+  if anything hangs.
+- Tasks' self-pipe: `Tasks` makes it (`TaskWaiting.-pipe`, two
+  descriptors) the first time a program waits idle, and keeps it until
+  the program ends. `TestTasks` calls `Tasks.WakeDescriptor`, which
+  makes it, before counting descriptors, and `test/vg-fds.sh` allows
+  the two that `TaskWaiting.-pipe` opened.
+- **memcheck can't check code running in a task.** poc's coroutine
+  stacks are `mmap`ed and not registered with valgrind
+  (`VALGRIND_STACK_REGISTER`), so memcheck reports thousands of
+  uninitialised values on them: 10,000,000 errors (its limit) for
+  `TestTasks`, and 23 for a throwaway program of two tasks that only
+  `Yield` (no posockets). `--max-stackframe` doesn't help. So tests in
+  `TASKTESTS` run under `valgrind --tool=none --track-fds=yes`, for
+  the descriptor check only. Registering the stacks belongs in
+  Peaseblossom's `Coroutines` (upstream; not done).
+- valgrind 3.27.1 counts each descriptor open at exit as an error for
+  `--error-exitcode` (`TestTasks` exited 99 with only the self-pipe
+  open), so `VALGRIND_TASKS` doesn't use it; `vg-fds.sh` does the
+  check.
+- poc: a record field's type may refer forward only as `POINTER TO`
+  the type (`target: POINTER TO Address`); a named pointer type
+  declared later is rejected ("forward reference to a type is allowed
+  only as a POINTER TO base type").
+- `make test` and `make valgrind` pass.
+
 ### Phase 5: deadlines
 
 Needs the timed descriptor wait in poc's `Tasks` (Deadlines), done in
 Peaseblossom on 2026-11-15 with its own tests, but not yet in a poc
 release; build against the checkout or the next release. First
 re-check here, with a program, `AwaitReadableFor` on a socket: ready
-before the time, the time passing, and 0 ms. Then `SetDeadline`, the timed waits in `SocketTasks`, `timedOut`, and
-stopping an accept loop with a deadline and a flag. `TestDeadline`: a
+before the time, the time passing, and 0 ms. Then `SetDeadline`, the timed waits in `SocketTasks`, `timedOut`,
+stopping an accept loop with a deadline and a flag, and the lingering
+close (moved from Phase 4: Sockets and closing). `TestDeadline`: a
 client that sends nothing is cut off near its deadline, one that sends
 in time is not, a socket is usable after a timeout, and an accept loop
 stops within its interval.

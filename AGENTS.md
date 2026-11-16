@@ -30,13 +30,16 @@ behaviour of poc that applies here unchanged:
 
 ## Status
 
-As of 2026-11-15, Phases 1 (the skeleton), 2 (errors and addresses)
-and 3 (blocking TCP) are done: the build, the test and valgrind
+As of 2026-11-15, Phases 1 (the skeleton), 2 (errors and addresses),
+3 (blocking TCP) and 4 (`SocketTasks`) are done: the build, the test and valgrind
 runners, and `Sockets` with its C part: `Error`, `Address`, `Resolve`,
 `Pair`, `Close`, `LocalAddress`, `PeerAddress`, `Listen`, `Accept`,
 `Connect`, `ConnectTo`, `FinishConnect`, `Read`, `Write`, `WriteAll`,
-`Shutdown`, `SetNonBlocking`, `Adopt` and `IgnoreBrokenPipe`. Next is
-Phase 4, `SocketTasks`.
+`Shutdown`, `SetNonBlocking`, `Adopt`, `IgnoreBrokenPipe`,
+`BeginWait`/`EndWait`; and `SocketTasks`: `Accept`, `Connect`,
+`ConnectTo`, `Read`, `Write`, `WriteAll`, waiting through `Tasks`. Next
+is Phase 5, deadlines, which takes the lingering close moved from
+Phase 4.
 
 ## Reference material
 
@@ -97,8 +100,13 @@ process instead.
 also accepting the memory glibc's loader keeps for the NSS modules
 `getaddrinfo` loads with `dlopen`), and
 `--track-fds=yes`; `test/vg-fds.sh` fails a test that leaves a
-descriptor open (more open at exit than it inherited). A test may also
-check its own count through `/proc/self/fd`.
+descriptor open (more open at exit than it inherited, less the two of
+Tasks' self-pipe, which it allows). A test may also check its own count
+through `/proc/self/fd`; one using tasks calls `Tasks.WakeDescriptor`
+first, so the self-pipe is already counted. Tests that run tasks are
+listed in `TASKTESTS` as well as `TESTS`: memcheck can't follow poc's
+coroutines, so `make valgrind` runs those under `--tool=none` for the
+descriptor check only.
 
 ## Layout
 
@@ -107,12 +115,12 @@ check its own count through `/proc/self/fd`.
   The C part does everything that touches `struct sockaddr`,
   `getaddrinfo`, socket options and `errno`, and hands Oberon only
   integers and text. The names stay unprefixed (PLAN.md, "Modules").
-- `src/SocketTasks.Mod` (Phase 4): the same operations waiting
-  through `Tasks` instead of in the kernel, and deadlines.
+- `src/SocketTasks.Mod`: the same operations waiting through `Tasks`
+  instead of in the kernel, and (Phase 5) deadlines. No C part.
 - `test/`: `Check.Mod`, the tests and halt tests, `poc-gc.supp`,
   `vg-reachable.sh`, `vg-fds.sh`. `TestHelp.Mod`/`.c`: what tests need
   that the library doesn't offer (a `poll` with a timeout, `SO_LINGER`
-  0, the descriptor limit and count). Helper programs a test runs as a
+  0, small socket buffers, the descriptor limit and count). Helper programs a test runs as a
   child (`BlockingPeer`, `TooManyFiles`) are listed in `HELPERS` and
   built into `build/` before the tests. `examples/` (Phase 8): as
   polibfyaml's.
@@ -196,6 +204,30 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   `/dev/null` itself. `make test` gives each test `/dev/null`.
 - **`Platform.System` returns the wait status**: 0 when the command
   exits 0, otherwise its exit code × 256.
+
+- **memcheck can't follow poc's coroutines.** Their stacks are
+  `mmap`ed and not registered with valgrind, so it warns "client
+  switching stacks?" and reports uninitialised values: 23 errors for a
+  program of two tasks that only `Yield`, 10,000,000 for `TestTasks`.
+  `--max-stackframe` doesn't help. Hence `TASKTESTS` and
+  `VALGRIND_TASKS` (`--tool=none --track-fds=yes`).
+- **valgrind 3.27.1 counts each descriptor open at exit as an error**
+  for `--error-exitcode`, with `--track-fds=yes`; so `VALGRIND_TASKS`
+  doesn't use it.
+- **Tasks keeps a self-pipe**: two descriptors, opened in
+  `TaskWaiting.-pipe` the first time the program waits idle, or by
+  `Tasks.WakeDescriptor()` (in poc 0.12.0), and never closed.
+- **Loopback's socket buffers are large enough that 300 KB never
+  blocked**: `send` never returned `EAGAIN`. Asking for 4096-byte
+  `SO_SNDBUF`/`SO_RCVBUF` (`TestHelp.SmallBuffers`) gave hundreds of
+  waits (`strace`).
+- **A record field may refer to a type declared later only as `POINTER
+  TO` it** (`target: POINTER TO Address`); a named pointer type
+  declared later is rejected.
+- **`Shutdown(shutBoth)` from one task wakes another's
+  `AwaitReadable`** on the same TCP socket, and the read then gives end
+  of stream; two tasks, one reading and one writing, wait on one socket
+  together (`TestTasks`).
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 

@@ -14,12 +14,15 @@ MODULE Sockets; (* TCP and Unix-domain sockets for poc *)
 
    Every procedure here either never waits or waits in the kernel, and a
    wait in the kernel stops every task (PLAN.md, "Tasks"); SocketTasks
-   (Phase 4) does the same operations waiting through Tasks.
+   does the same operations waiting through Tasks, on a non-blocking
+   socket. Sockets never imports Tasks, so a program without tasks
+   doesn't link them.
 
    Phase 2 (PLAN.md, "Roadmap"): errors, addresses, Resolve, Pair, Close,
    LocalAddress and PeerAddress. Phase 3: Listen, Accept, Connect,
    ConnectTo, FinishConnect, Read, Write, WriteAll, Shutdown,
-   SetNonBlocking, Adopt and IgnoreBrokenPipe, for TCP. *)
+   SetNonBlocking, Adopt and IgnoreBrokenPipe, for TCP. Phase 4:
+   BeginWait and EndWait, for SocketTasks. *)
 
 IMPORT SYSTEM;
 
@@ -72,7 +75,10 @@ TYPE
     listening-: BOOLEAN;   (* made by Listen, or SO_ACCEPTCONN on Adopt *)
     nonBlocking-: BOOLEAN;
     deadline-: LONGINT;    (* monotonic ms, 0 for none *)
-    waiters-: INTEGER      (* SocketTasks calls waiting on it now *)
+    waiters-: INTEGER;     (* SocketTasks calls waiting on it now *)
+    (* the address a non-blocking ConnectTo is connecting to, for
+       FinishConnect's error text; NIL once it is finished *)
+    target: POINTER TO Address
   END;
 
   (* An address as text, never a reverse lookup: host is numeric
@@ -189,7 +195,7 @@ PROCEDURE NewSocket(fd: LONGINT; family: INTEGER): Socket;
   VAR s: Socket;
 BEGIN
   NEW(s); s.fd := fd; s.family := family; s.listening := FALSE;
-  s.nonBlocking := FALSE; s.deadline := 0; s.waiters := 0;
+  s.nonBlocking := FALSE; s.deadline := 0; s.waiters := 0; s.target := NIL;
   RETURN s
 END NewSocket;
 
@@ -448,7 +454,8 @@ BEGIN
   r := CConnectTo(a.host, LEN(a.host), a.port, Flag(nonBlocking), fd);
   IF (r = 0) OR (r = WouldBlock) THEN
     s := NewSocket(SYSTEM.VAL(LONGINT, fd), a.family);
-    s.nonBlocking := nonBlocking
+    s.nonBlocking := nonBlocking;
+    IF r = WouldBlock THEN NEW(s.target); s.target^ := a END
   END;
   what := "connect to "; Append(what, a.host); Append(what, " port ");
   AppendInt(what, a.port);
@@ -456,13 +463,40 @@ BEGIN
 END ConnectTo;
 
 (* The outcome of a non-blocking ConnectTo, once s is writable: TRUE if
-   connected, a system error if the connection failed (ECONNREFUSED), or
-   wouldBlock (want = wantWrite) if it is still in progress. *)
+   connected, a system error if the connection failed ("connect to
+   127.0.0.1 port 7: Connection refused"), or wouldBlock (want =
+   wantWrite) if it is still in progress, so calling it early is
+   harmless. *)
 PROCEDURE FinishConnect*(s: Socket; VAR err: Error): BOOLEAN;
+  VAR r: SYSTEM.INT32; what: ARRAY 256 OF CHAR;
 BEGIN
   CheckStream(s); ClearError(err);
-  RETURN Outcome(CFinishConnect(s.fd), wantWrite, "connect", err)
+  r := CFinishConnect(s.fd);
+  IF s.target = NIL THEN what := "connect"
+  ELSE
+    what := "connect to "; Append(what, s.target.host); Append(what, " port ");
+    AppendInt(what, s.target.port)
+  END;
+  IF r # WouldBlock THEN s.target := NIL END;
+  RETURN Outcome(r, wantWrite, what, err)
 END FinishConnect;
+
+(* Waits *)
+
+(* For SocketTasks only: around each wait through Tasks on s, BeginWait
+   before and EndWait after, so that a Close from another task while it
+   waits halts (AssertWaiting) instead of leaving the wait on a closed
+   descriptor, or on another file given its number. *)
+PROCEDURE BeginWait*(s: Socket);
+BEGIN
+  ASSERT(s.fd # -1, AssertClosed);
+  INC(s.waiters)
+END BeginWait;
+
+PROCEDURE EndWait*(s: Socket);
+BEGIN
+  DEC(s.waiters)
+END EndWait;
 
 (* I/O *)
 

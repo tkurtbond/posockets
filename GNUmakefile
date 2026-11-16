@@ -25,6 +25,14 @@ VARIANTS := $(MODELS) $(addsuffix -g,$(MODELS))
 # --track-fds=yes makes valgrind list the descriptors open at exit; the
 # valgrind target requires that the test opened none of them.
 VALGRIND ?= valgrind --leak-check=full --show-leak-kinds=all --track-fds=yes --error-exitcode=99 --suppressions=poc-gc.supp
+# memcheck can't follow poc's coroutines: their stacks are mmap'ed and not
+# registered with valgrind (VALGRIND_STACK_REGISTER), so code running on
+# them gives thousands of false "uninitialised" errors; a program of two
+# tasks and nothing else gives 23 (checked 2026-11-15, poc 0.12.0). The
+# tests in TASKTESTS run with no memory check, only the descriptor check,
+# by vg-fds.sh: no --error-exitcode, since valgrind 3.27.1 counts every
+# descriptor open at exit as an error, Tasks' self-pipe included.
+VALGRIND_TASKS ?= valgrind --tool=none --track-fds=yes
 
 # An installed library on POC_LIBRARY_PATH would be taken in place of this
 # checkout's source, or would stop the build if another poc wrote it.
@@ -36,7 +44,7 @@ LIBDIR := $(BUILD)/lib
 LIBRARY := posockets
 # The library's modules, in import order (PLAN.md, "Modules"). SocketTasks
 # joins in Phase 4.
-LIBMODS := Sockets
+LIBMODS := Sockets SocketTasks
 
 # $(call variant-flags,<variant>) gives poc's flags for a variant: OC-g gives
 # -OC -g.
@@ -49,14 +57,17 @@ POCBIN := $(shell command -v $(POC))
 # The modules and their C parts, whichever have one.
 LIBSRC := $(LIBMODS:%=src/%.Mod) $(wildcard $(LIBMODS:%=src/%.c))
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestAddress TestBlocking TestErrors
+TESTS := TestAddress TestBlocking TestErrors TestTasks
+# tests that run tasks (VALGRIND_TASKS)
+TASKTESTS := TestTasks
 # Programs the tests start (test/<name>.Mod), not tests themselves.
 HELPERS := BlockingPeer TooManyFiles
 # Programs that must halt (test/<name>.Mod), as name:Assert-code. poc's
 # ASSERT(x, n) prints "assertion failed (n)" on standard error and exits
 # with status 10, so `make test` requires both.
 HALTTESTS := HaltClosed:80 HaltPort:84 HaltAddrs:84 HaltRange:81 HaltListening:85 \
-  HaltAccept:85 HaltBacklog:84 HaltListeners:84 HaltShutdown:84
+  HaltAccept:85 HaltBacklog:84 HaltListeners:84 HaltShutdown:84 \
+  HaltBlocking:82 HaltWaiting:86
 ASSERTSTATUS := 10
 
 # Example programs (examples/<name>.Mod), as name:required-exit-status.
@@ -122,13 +133,21 @@ test: tests
 # Each test under valgrind. Besides definite and indirect leaks, every
 # still-reachable block must be the collector's own (test/vg-reachable.sh),
 # and every descriptor open at exit must be one the test inherited
-# (test/vg-fds.sh, from valgrind's --track-fds=yes report).
+# (test/vg-fds.sh, from valgrind's --track-fds=yes report). A test in
+# TASKTESTS gets the descriptor check only (VALGRIND_TASKS).
 valgrind: tests
 	@status=0; for t in $(TESTS); do \
-	  echo "== valgrind $$t"; \
-	  (cd test && $(VALGRIND) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t < /dev/null) || status=1; \
-	  grep -E 'ERROR SUMMARY|lost:|reachable:|FILE DESCRIPTORS' $(BUILD)/$$t.vg; \
-	  test/vg-reachable.sh $(BUILD)/$$t.vg || { echo "FAIL - $$t: still-reachable memory the collector did not allocate"; status=1; }; \
+	  case " $(TASKTESTS) " in \
+	  *" $$t "*) \
+	    echo "== valgrind $$t (descriptors only: memcheck can't follow poc's coroutines)"; \
+	    (cd test && $(VALGRIND_TASKS) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t < /dev/null) || status=1; \
+	    grep -E 'FILE DESCRIPTORS' $(BUILD)/$$t.vg;; \
+	  *) \
+	    echo "== valgrind $$t"; \
+	    (cd test && $(VALGRIND) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t < /dev/null) || status=1; \
+	    grep -E 'ERROR SUMMARY|lost:|reachable:|FILE DESCRIPTORS' $(BUILD)/$$t.vg; \
+	    test/vg-reachable.sh $(BUILD)/$$t.vg || { echo "FAIL - $$t: still-reachable memory the collector did not allocate"; status=1; };; \
+	  esac; \
 	  test/vg-fds.sh $(BUILD)/$$t.vg || { echo "FAIL - $$t: descriptors left open at exit (see $(BUILD)/$$t.vg)"; status=1; }; \
 	done; exit $$status
 

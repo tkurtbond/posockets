@@ -47,6 +47,18 @@ int32_t reset_on_close(int64_t fd)
 	return setsockopt((int)fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
 }
 
+/* Asks for send and receive buffers of bytes each; the kernel may
+   round up (Linux doubles it, and has a minimum). */
+int32_t small_buffers(int64_t fd, int32_t bytes) NAME("small-buffers");
+int32_t small_buffers(int64_t fd, int32_t bytes)
+{
+	int b = bytes;
+
+	if (setsockopt((int)fd, SOL_SOCKET, SO_SNDBUF, &b, sizeof b) != 0)
+		return -1;
+	return setsockopt((int)fd, SOL_SOCKET, SO_RCVBUF, &b, sizeof b);
+}
+
 /* RLIMIT_NOFILE's soft limit, or -1. */
 int64_t file_limit(void) NAME("file-limit");
 int64_t file_limit(void)

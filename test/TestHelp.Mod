@@ -7,6 +7,7 @@ IMPORT SYSTEM;
 PROCEDURE ["C", "TestHelp.-wait"] CWait(fd: SYSTEM.INT64; write, ms: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-dup"] CDup(fd: SYSTEM.INT64): SYSTEM.INT64;
 PROCEDURE ["C", "TestHelp.-reset-on-close"] CResetOnClose(fd: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "TestHelp.-small-buffers"] CSmallBuffers(fd: SYSTEM.INT64; bytes: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-file-limit"] CFileLimit(): SYSTEM.INT64;
 PROCEDURE ["C", "TestHelp.-set-file-limit"] CSetFileLimit(n: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-open-fds"] COpenFds(): SYSTEM.INT32;
@@ -38,6 +39,14 @@ PROCEDURE ResetOnClose*(fd: LONGINT): BOOLEAN;
 BEGIN
   RETURN CResetOnClose(fd) = 0
 END ResetOnClose;
+
+(* Small send and receive buffers on fd (SO_SNDBUF, SO_RCVBUF), so
+   that a test's reads and writes wait: with the loopback's own, 300,000
+   bytes on each of 20 connections never did (PLAN.md, "Testing"). *)
+PROCEDURE SmallBuffers*(fd: LONGINT; bytes: INTEGER): BOOLEAN;
+BEGIN
+  RETURN CSmallBuffers(fd, bytes) = 0
+END SmallBuffers;
 
 (* RLIMIT_NOFILE's soft limit, or -1 *)
 PROCEDURE FileLimit*(): LONGINT;

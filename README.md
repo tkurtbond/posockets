@@ -20,12 +20,12 @@ It is planned to offer:
 - errors from the network or the system returned as a result, never a
   halt.
 
-**Status: early.** Phases 1 to 3 of [PLAN.md](PLAN.md) are done:
+**Status: early.** Phases 1 to 4 of [PLAN.md](PLAN.md) are done:
 the build and tests, errors, addresses as text, resolving names, socket
 pairs, and blocking TCP over IPv4 and IPv6 (`Listen`, `Accept`,
 `Connect`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Close`), with
-non-blocking sockets returning `wouldBlock`. Waiting through `Tasks`
-(`SocketTasks`) comes next. PLAN.md has the design and the
+non-blocking sockets, and `SocketTasks`, which waits through poc's
+`Tasks` so one thread serves many connections. Deadlines come next. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 ## Requirements
@@ -38,6 +38,17 @@ roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 The library links nothing beyond the C library, so a program using it
 needs no extra flags.
+
+Two things a program using `SocketTasks` meets that come from poc's
+`Tasks`, not from posockets:
+
+- valgrind's memcheck can't follow poc's coroutines (as of poc 0.12.0)
+  and reports thousands of errors that aren't the program's. Use
+  `valgrind --tool=none --track-fds=yes` to check for descriptors left
+  open.
+- `Tasks` keeps two descriptors of its own (a self-pipe) open until the
+  program ends, so a check for leaked descriptors should allow for
+  them.
 
 ## Building
 
