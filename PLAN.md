@@ -659,8 +659,41 @@ C's numbers.
 ### Phase 8: examples and documentation
 
 `examples/`: an echo server with `SocketTasks` (one task per
-connection, both families, a deadline) and a blocking client. A
-`doc/` reference like polibfyaml's, from the exported declarations and
+connection, both families, a deadline) and a blocking client, the
+smallest complete programs; and three that do something useful (the
+user, 2026-11-15):
+
+- **`Netcat`**: connect to a host and port, or a Unix-domain path, or
+  listen on one and take a single connection; then copy standard input
+  to the socket and the socket to standard output until both directions
+  end, with `Shutdown` for the half-close when standard input ends.
+  Blocking or with `SocketTasks` (one task each way); handy for poking
+  at the Gemini server.
+- **`Forward`**, a TCP port forwarder: listen on a local port, and for
+  each connection connect onward to a target host and port and copy
+  both ways with a pair of tasks, closing both sides when either ends.
+  Shows many connections in one thread, `SocketTasks.Connect` over
+  `Resolve`'s addresses, and an idle deadline. It's the proxy pattern
+  `TestTasks` exercises, as a program.
+- **`FileServer`**, a minimal static-file server over HTTP/1.0: serve
+  one directory, `GET` and `HEAD` only, a few content types by file
+  extension, and 400/404/405 responses. It refuses paths that leave the
+  directory (`..`, absolute paths) and reads the request with a
+  deadline. It can be tried with `curl`. Kept small: the HTTP parsing
+  is the minimum, and the example says it is not for the open internet.
+
+The `EXAMPLES` runner in the makefile compares standard output with an
+`.expected` file, which suits only programs that end by themselves. So
+each of these examples gets a test that starts it on a port-0 or
+`build/` address and drives it from the other side: `Netcat` against
+a listener in the test, `Forward` between a test client and a test
+echo server, and `FileServer` with requests for a file in `test/`, a
+missing one, and a `..` path. A server example started on port 0 prints
+the port it was given, read back with `LocalAddress`, as its first line,
+so the test can learn it. The test starts the example in the
+background, as `TestBlocking` starts its helper.
+
+A `doc/` reference like polibfyaml's, from the exported declarations and
 their comments.
 
 ### Phase 9: BSD port
