@@ -560,8 +560,9 @@ Done 2026-11-15:
   a halt with the right code and fails one with the wrong code (two
   throwaway halt tests); `make install` into a scratch directory, a
   program built against it, and `make uninstall` leaving it empty.
-- `LICENSE`: BSD 3-Clause, as polibfyaml's (the user, 2026-11-15). No
-  `README.md` yet.
+- `LICENSE`: BSD 3-Clause, as polibfyaml's (the user, 2026-11-15).
+  `README.md`: what the library is and will offer, its status, how to
+  build and install it; to be kept in step as the phases land.
 
 ### Phase 2: errors and addresses
 
