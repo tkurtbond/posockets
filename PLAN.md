@@ -536,12 +536,32 @@ Still to confirm:
   `0X` or the length, so an array with no terminator can't make it
   read past the end.
 
-### Phase 1: project skeleton
+### Phase 1: project skeleton [done]
 
 `GNUmakefile`, `.gitignore`, `test/Check.Mod`, `test/poc-gc.supp`,
 `test/vg-reachable.sh` and the halt-test runner copied from polibfyaml
 and adapted; `make`, `make test`, `make valgrind`, `make install` work
 on an empty `Sockets`.
+
+Done 2026-11-15:
+
+- `Sockets` has its family constants, the halt codes as `Assert*`
+  constants (`AssertClosed` = 80 to `AssertWaiting` = 86), and
+  `Socket`/`SocketDesc` as in "Sockets and closing"; no procedures and
+  no C part yet. `TestSkeleton` checks that a program links it, and
+  goes when the real tests come.
+- `LIBSRC` takes a module's C part when `src/<Module>.c` exists, so
+  Phase 2 adds `Sockets.c` without touching the makefile.
+- `make valgrind` also fails a test that leaves a descriptor open:
+  `test/vg-fds.sh` (new) compares valgrind 3.27's "`<n>` open (`<m>`
+  inherited) at exit". It uses `awk`, not a `grep -E` back-reference,
+  which the BSDs' `grep` needn't support (AGENTS.md, "Confirmed facts").
+- Checked: `make test` and `make valgrind` pass; the halt runner passes
+  a halt with the right code and fails one with the wrong code (two
+  throwaway halt tests); `make install` into a scratch directory, a
+  program built against it, and `make uninstall` leaving it empty.
+- `LICENSE`: BSD 3-Clause, as polibfyaml's (the user, 2026-11-15). No
+  `README.md` yet.
 
 ### Phase 2: errors and addresses
 

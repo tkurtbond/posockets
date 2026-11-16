@@ -30,8 +30,10 @@ behaviour of poc that applies here unchanged:
 
 ## Status
 
-As of 2026-11-15, the repo holds only this file and PLAN.md. A probe
-confirmed the mechanisms the design rests on (see "Confirmed facts").
+As of 2026-11-15, Phase 1 (the skeleton) is done: the build, the test
+and valgrind runners, and `Sockets` with its types and constants but no
+operations yet. A probe confirmed the mechanisms the design rests on
+(see "Confirmed facts"). Next is Phase 2, errors and addresses.
 
 ## Reference material
 
@@ -46,29 +48,35 @@ confirmed the mechanisms the design rests on (see "Confirmed facts").
 
 ## Build
 
-Not written yet; PLAN.md, Phase 1. It will follow polibfyaml's
-`GNUmakefile`: `make`, `make test`, `make valgrind`, `make clean`,
+`GNUmakefile`, adapted from polibfyaml's: `make`, `make test`, `make
+valgrind`, `make clean`,
 `make install`/`uninstall` into `POCLIBDIR` (`~/.local/lib/poc` by
 default), with `POC` from `PATH`, output under `build/` via
 `-output-dir`, `.NOTPARALLEL`, and `POC_LIBRARY_PATH` unexported so an
-installed copy is never tested in place of this checkout. The library
+installed copy is never tested in place of this checkout. `LIBMODS`
+lists the library's modules, and `LIBSRC` takes each one's C part
+(`src/<Module>.c`) if it has one. The library
 links nothing beyond libc, so a program using posockets passes no
 flags. polibtls's TCP tests take the installed library, so a change
 here that polibtls depends on means `make install` before testing
 there.
 
-The integer size model is to be `-OC`, as in polibfyaml and polibtls
+The integer size model is `-OC`, as in polibfyaml and polibtls
 (PLAN.md, "Integer model"). The C part uses only `int32_t`, `int64_t`
 and `intptr_t`, so its boundary means the same under either model.
 
 ## Test
 
-Planned (PLAN.md, Phase 1 and "Testing"): one main module per concern
+PLAN.md, "Testing": one main module per concern
 in `test/`, printing `ok   - <label>` / `FAIL - <label>` through a shared
 `test/Check.Mod` and ending with `All checks passed.` or `<N> check(s)
-failed.`; halt tests `test/Halt*.Mod` listed as `name:code`. **poc's
-`ASSERT(x, n)` exits with status 10**, printing `assertion failed (n)`,
-not with `n`.
+failed.`, listed in `TESTS`; halt tests `test/Halt*.Mod` listed in
+`HALTTESTS` as `name:code`. **poc's `ASSERT(x, n)` exits with status
+10**, printing `assertion failed (n)`, not with `n`; `make test`
+requires both. **poc rejects an `ASSERT` whose condition is the
+constant `FALSE`** ("ASSERT condition is always FALSE"), so a halt test
+must reach its `ASSERT` with a value known only when it runs. Each
+test runs from `test/`, with standard input `/dev/null`.
 
 Tests use only the loopback interface: TCP on `127.0.0.1` and `::1`
 with port 0 (the kernel's choice, read back with `LocalAddress`), so
@@ -81,21 +89,24 @@ Both sides of a connection run in one program, as tasks. A blocking
 call stops every task, so a test that blocks runs its peer in a child
 process instead.
 
-Run every test under valgrind (`make valgrind`) with polibfyaml's
-`test/poc-gc.supp` copied here, and check for descriptors left open
-too: valgrind's `--track-fds=yes` lists them at exit, and a test may
+`make valgrind` runs every test under valgrind with polibfyaml's
+`test/poc-gc.supp` and `test/vg-reachable.sh` copied here, and
+`--track-fds=yes`; `test/vg-fds.sh` fails a test that leaves a
+descriptor open (more open at exit than it inherited). A test may also
 check its own count through `/proc/self/fd`.
 
-## Layout (planned)
+## Layout
 
 - `src/Sockets.Mod`, `src/Sockets.c`: sockets, addresses, errors, and
   the calls that never wait (or wait in the kernel, in blocking mode).
   The C part does everything that touches `struct sockaddr`,
   `getaddrinfo`, socket options and `errno`, and hands Oberon only
   integers and text. The names stay unprefixed (PLAN.md, "Modules").
-- `src/SocketTasks.Mod`: the same operations waiting through `Tasks`
-  instead of in the kernel, and deadlines.
-- `test/`, `examples/`: as polibfyaml's.
+- `src/SocketTasks.Mod` (Phase 4): the same operations waiting
+  through `Tasks` instead of in the kernel, and deadlines.
+- `test/`: `Check.Mod`, the tests and halt tests, `poc-gc.supp`,
+  `vg-reachable.sh`, `vg-fds.sh`. `examples/` (Phase 8): as
+  polibfyaml's.
 - `build/`: poc and clang output, and the tests' Unix-domain sockets
   (gitignored).
 - `PLAN.md`: design, decisions, confirmed findings and open questions,
@@ -126,6 +137,21 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   make it ready (PLAN.md, "Deadlines"). True of poc 0.12.0; the
   Peaseblossom checkout (commit 73109d2, 2026-11-15) adds
   `AwaitReadableFor`/`AwaitWritableFor`, not yet in a release.
+
+- **valgrind's `--track-fds=yes` reports `FILE DESCRIPTORS: <n> open
+  (<m> inherited) at exit.`** (valgrind 3.27.1), not `(3 std)` as older
+  versions did. A test program run by make inherits 0, 1 and 2 (3 open,
+  3 inherited); a descriptor opened in C and left open made it 4 open,
+  3 inherited, and was listed with the stack that opened it. Hence
+  `test/vg-fds.sh` compares the two numbers rather than expecting 3.
+- **poc rejects `ASSERT(FALSE, n)`** at compile time ("ASSERT condition
+  is always FALSE"); `b := FALSE; ASSERT(b, n)` compiles, and halts with
+  status 10 and `assertion failed (n)`.
+- **A library with no C part and no procedures** builds with `poc
+  -library`, installs with `-install-library`, and a program built with
+  `-library-path` at the install directory takes it from there, not
+  from source (`make install` into a scratch directory, then a program
+  built against it; checked 2026-11-15).
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 
