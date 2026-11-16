@@ -23,7 +23,8 @@ MODULE Sockets; (* TCP and Unix-domain sockets for poc *)
    ConnectTo, FinishConnect, Read, Write, WriteAll, Shutdown,
    SetNonBlocking, Adopt and IgnoreBrokenPipe, for TCP. Phase 4:
    BeginWait and EndWait, for SocketTasks. Phase 5: SetDeadline, and
-   Now, and TimeLeft and TimedOut for SocketTasks. *)
+   Now, and TimeLeft and TimedOut for SocketTasks. Phase 6: ListenUnix
+   and ConnectUnix. *)
 
 IMPORT SYSTEM;
 
@@ -105,7 +106,9 @@ VAR
   (* errno values a caller may act on, as Error.code of a system error.
      Their numbers differ between systems, so they come from the C part. *)
   ECONNREFUSED-, ECONNRESET-, EPIPE-, EADDRINUSE-, EMFILE-, ENFILE-,
-  EAFNOSUPPORT-, EADDRNOTAVAIL-: INTEGER;
+  EAFNOSUPPORT-, EADDRNOTAVAIL-, ENOENT-, EAGAIN-: INTEGER;
+
+  unixPathMax: INTEGER;    (* sun_path's size, terminator included *)
 
 PROCEDURE ["C", "Sockets.-errno-value"] CErrnoValue(which: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-error-text"] CErrorText(kind, code: SYSTEM.INT32;
@@ -150,6 +153,14 @@ PROCEDURE ["C", "Sockets.-adopt"] CAdopt(fd: SYSTEM.INT64;
   VAR family, listening, nonBlocking: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-ignore-sigpipe"] CIgnoreSigpipe(): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-now"] CNow(): SYSTEM.INT64;
+PROCEDURE ["C", "Sockets.-unix-path-max"] CUnixPathMax(): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-listen-unix"] CListenUnix(path: ARRAY OF CHAR;
+  pathLen: SYSTEM.ADDRESS; backlog, nonBlocking: SYSTEM.INT32;
+  VAR fd: SYSTEM.INT64; VAR what: ARRAY OF CHAR;
+  whatLen: SYSTEM.ADDRESS): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-connect-unix"] CConnectUnix(path: ARRAY OF CHAR;
+  pathLen: SYSTEM.ADDRESS; nonBlocking: SYSTEM.INT32;
+  VAR fd: SYSTEM.INT64): SYSTEM.INT32;
 
 (* Text building, for an Error's prefix *)
 
@@ -175,6 +186,15 @@ BEGIN
   d[k] := 0X;
   Append(s, d)
 END AppendInt;
+
+(* "<verb> <host> port <port>", or for a Unix-domain address "<verb>
+   <path>", appended to s. *)
+PROCEDURE AppendAddress(VAR s: ARRAY OF CHAR; verb: ARRAY OF CHAR;
+    a: Address);
+BEGIN
+  Append(s, verb); Append(s, " "); Append(s, a.host);
+  IF a.family # unix THEN Append(s, " port "); AppendInt(s, a.port) END
+END AppendAddress;
 
 (* Errors *)
 
@@ -420,7 +440,7 @@ END Accept;
    last error ("connect to 127.0.0.1 port 7: Connection refused"). Waits
    for the kernel to give up on an address that doesn't answer (about
    two minutes on Linux), with every task stopped; SocketTasks.Connect
-   has deadlines. Halts (AssertArgument) for a port outside 0..65535. *)
+   takes a time limit. Halts (AssertArgument) for a port outside 0..65535. *)
 PROCEDURE Connect*(host: ARRAY OF CHAR; port: INTEGER; VAR s: Socket;
     VAR err: Error): BOOLEAN;
   VAR fd: SYSTEM.INT64; family, code, kind: SYSTEM.INT32;
@@ -459,8 +479,7 @@ BEGIN
     s.nonBlocking := nonBlocking;
     IF r = WouldBlock THEN NEW(s.target); s.target^ := a END
   END;
-  what := "connect to "; Append(what, a.host); Append(what, " port ");
-  AppendInt(what, a.port);
+  what[0] := 0X; AppendAddress(what, "connect to", a);
   RETURN Outcome(r, wantWrite, what, err)
 END ConnectTo;
 
@@ -475,13 +494,72 @@ BEGIN
   CheckStream(s); ClearError(err);
   r := CFinishConnect(s.fd);
   IF s.target = NIL THEN what := "connect"
-  ELSE
-    what := "connect to "; Append(what, s.target.host); Append(what, " port ");
-    AppendInt(what, s.target.port)
+  ELSE what[0] := 0X; AppendAddress(what, "connect to", s.target^)
   END;
   IF r # WouldBlock THEN s.target := NIL END;
   RETURN Outcome(r, wantWrite, what, err)
 END FinishConnect;
+
+(* Unix-domain sockets *)
+
+(* Halts unless path is a usable Unix-domain path: not empty
+   (AssertArgument), and short enough for sun_path with its terminator
+   (AssertPath): at most 107 bytes on Linux, 103 on the BSDs. *)
+PROCEDURE CheckPath(path: ARRAY OF CHAR);
+  VAR n: LONGINT;
+BEGIN
+  n := 0; WHILE (n < LEN(path)) & (path[n] # 0X) DO INC(n) END;
+  ASSERT(n > 0, AssertArgument);
+  ASSERT(n < unixPathMax, AssertPath)
+END CheckPath;
+
+(* A listening Unix-domain stream socket at path, as l, blocking unless
+   nonBlocking. bind makes a file at path, which stays when l is closed:
+   removing it is the caller's (Files.Delete, Platform.Unlink), and
+   posockets never removes a file. A file already there, even a stale
+   socket left by an earlier run, gives EADDRINUSE ("bind <path>:
+   Address already in use"); a server that knows the file is its own
+   removes it first. Who may connect is up to the file's permissions,
+   from the umask. Halts (AssertArgument) for an empty path or a
+   negative backlog, (AssertPath) for one too long (CheckPath). *)
+PROCEDURE ListenUnix*(path: ARRAY OF CHAR; backlog: INTEGER;
+    nonBlocking: BOOLEAN; VAR l: Socket; VAR err: Error): BOOLEAN;
+  VAR fd: SYSTEM.INT64; r: SYSTEM.INT32; what: ARRAY 256 OF CHAR;
+BEGIN
+  CheckPath(path); ASSERT(backlog >= 0, AssertArgument);
+  ClearError(err); l := NIL; what[0] := 0X;
+  r := CListenUnix(path, LEN(path), backlog, Flag(nonBlocking), fd, what,
+    LEN(what));
+  IF r # 0 THEN SetError(err, system, r, what); RETURN FALSE END;
+  l := NewSocket(SYSTEM.VAL(LONGINT, fd), unix);
+  l.listening := TRUE; l.nonBlocking := nonBlocking;
+  RETURN TRUE
+END ListenUnix;
+
+(* A Unix-domain stream connection to the listener at path, as s,
+   blocking unless nonBlocking. A connection is queued at once, so this
+   never waits for the listener to accept; but when the listener's queue
+   is full, a blocking connect waits for room (on Linux), and a
+   non-blocking one fails with EAGAIN, nothing in progress, s NIL: try
+   again later (SocketTasks.ConnectUnix does). No file at path gives
+   ENOENT, a file with no listener (a stale socket) ECONNREFUSED: "connect
+   to <path>: Connection refused". Halts as ListenUnix for the path. *)
+PROCEDURE ConnectUnix*(path: ARRAY OF CHAR; nonBlocking: BOOLEAN;
+    VAR s: Socket; VAR err: Error): BOOLEAN;
+  VAR fd: SYSTEM.INT64; r: SYSTEM.INT32; a: Address; what: ARRAY 256 OF CHAR;
+BEGIN
+  CheckPath(path);
+  ClearError(err); s := NIL;
+  a.family := unix; COPY(path, a.host); a.port := 0;
+  r := CConnectUnix(path, LEN(path), Flag(nonBlocking), fd);
+  IF (r = 0) OR (r = WouldBlock) THEN
+    s := NewSocket(SYSTEM.VAL(LONGINT, fd), unix);
+    s.nonBlocking := nonBlocking;
+    IF r = WouldBlock THEN NEW(s.target); s.target^ := a END
+  END;
+  what[0] := 0X; AppendAddress(what, "connect to", a);
+  RETURN Outcome(r, wantWrite, what, err)
+END ConnectUnix;
 
 (* Deadlines *)
 
@@ -520,14 +598,12 @@ END TimeLeft;
 
 (* For SocketTasks: sets err to timedOut, its text "<what>: timed out",
    or for a connection still being made, "connect to <host> port <p>:
-   timed out". *)
+   timed out". s may be NIL, for a wait with no socket yet. *)
 PROCEDURE TimedOut*(s: Socket; VAR err: Error; what: ARRAY OF CHAR);
 BEGIN
   err.kind := timedOut; err.want := 0; err.code := 0; err.text[0] := 0X;
-  IF s.target # NIL THEN
-    Append(err.text, "connect to "); Append(err.text, s.target.host);
-    Append(err.text, " port "); AppendInt(err.text, s.target.port);
-    s.target := NIL
+  IF (s # NIL) & (s.target # NIL) THEN
+    AppendAddress(err.text, "connect to", s.target^); s.target := NIL
   ELSE Append(err.text, what)
   END;
   Append(err.text, ": timed out")
@@ -667,5 +743,7 @@ BEGIN
   ECONNREFUSED := CErrnoValue(0); ECONNRESET := CErrnoValue(1);
   EPIPE := CErrnoValue(2); EADDRINUSE := CErrnoValue(3);
   EMFILE := CErrnoValue(4); ENFILE := CErrnoValue(5);
-  EAFNOSUPPORT := CErrnoValue(6); EADDRNOTAVAIL := CErrnoValue(7)
+  EAFNOSUPPORT := CErrnoValue(6); EADDRNOTAVAIL := CErrnoValue(7);
+  ENOENT := CErrnoValue(8); EAGAIN := CErrnoValue(9);
+  unixPathMax := CUnixPathMax()
 END Sockets.

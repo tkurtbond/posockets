@@ -20,14 +20,15 @@ It is planned to offer:
 - errors from the network or the system returned as a result, never a
   halt.
 
-**Status: early.** Phases 1 to 5 of [PLAN.md](PLAN.md) are done:
+**Status: early.** Phases 1 to 6 of [PLAN.md](PLAN.md) are done:
 the build and tests, errors, addresses as text, resolving names, socket
 pairs, and blocking TCP over IPv4 and IPv6 (`Listen`, `Accept`,
 `Connect`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Close`), with
 non-blocking sockets, and `SocketTasks`, which waits through poc's
 `Tasks` so one thread serves many connections, with deadlines on its
-waits, time limits on connecting, and a lingering close. Unix-domain
-sockets come next. PLAN.md has the design and the
+waits, time limits on connecting, and a lingering close; and
+Unix-domain stream sockets (`ListenUnix`, `ConnectUnix`). Socket
+options come next. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 ## Requirements
@@ -53,6 +54,30 @@ Two things a program using `SocketTasks` meets that come from poc's
 - `Tasks` keeps two descriptors of its own (a self-pipe) open until the
   program ends, so a check for leaked descriptors should allow for
   them.
+
+## Unix-domain sockets
+
+- **The socket file stays.** `ListenUnix` creates a file at its path,
+  and closing the listener leaves it there. posockets never removes a
+  file: the program removes it (`Files.Delete`, `Platform.Unlink`),
+  and a server that knows a leftover file is its own removes it before
+  `ListenUnix`, which otherwise fails with `EADDRINUSE`.
+- **A connect doesn't wait for the accept.** It is queued at once.
+  Only a full listen queue holds it back. Then, on Linux, a blocking
+  `Sockets.ConnectUnix` waits for room, and a non-blocking one fails
+  with `EAGAIN` and no socket, with nothing to wait on.
+  `SocketTasks.ConnectUnix` retries for you, sleeping from 1 ms
+  doubling to 64 ms, until there is room or its time limit passes.
+- **Other failures come back at once:** `ENOENT` when there is no file
+  at the path, `ECONNREFUSED` when the file is a stale socket with no
+  listener.
+- **A path is at most 107 bytes on Linux** (103 on the BSDs). A longer
+  one, or an empty one, is a programmer error and halts.
+- **The peer of an accepted connection is usually unnamed**: its
+  address has family `unix` and an empty host.
+
+The comments in `src/Sockets.Mod` and `src/SocketTasks.Mod` are the
+reference for each procedure.
 
 ## Building
 

@@ -31,16 +31,18 @@ behaviour of poc that applies here unchanged:
 ## Status
 
 As of 2026-11-15, Phases 1 (the skeleton), 2 (errors and addresses),
-3 (blocking TCP), 4 (`SocketTasks`) and 5 (deadlines) are done: the
+3 (blocking TCP), 4 (`SocketTasks`), 5 (deadlines) and 6 (Unix-domain
+sockets) are done: the
 build, the test and valgrind runners, and `Sockets` with its C part:
 `Error`, `Address`, `Resolve`, `Pair`, `Close`, `LocalAddress`,
 `PeerAddress`, `Listen`, `Accept`, `Connect`, `ConnectTo`,
 `FinishConnect`, `Read`, `Write`, `WriteAll`, `Shutdown`,
 `SetNonBlocking`, `Adopt`, `IgnoreBrokenPipe`, `BeginWait`/`EndWait`,
-`Now`, `SetDeadline`, `TimeLeft`, `TimedOut`; and `SocketTasks`:
-`Accept`, `Connect`, `ConnectTo` (both with a time limit), `Read`,
+`Now`, `SetDeadline`, `TimeLeft`, `TimedOut`, `ListenUnix`,
+`ConnectUnix`; and `SocketTasks`: `Accept`, `Connect`, `ConnectTo`,
+`ConnectUnix` (all three with a time limit), `Read`,
 `Write`, `WriteAll`, `LingeringClose`, waiting through `Tasks` until
-the socket's deadline. Next is Phase 6, Unix-domain sockets.
+the socket's deadline. Next is Phase 7, socket options.
 
 **Phase 5 needs a poc newer than 0.12.0** (`Tasks.AwaitReadableFor`,
 Peaseblossom commit 73109d2, in no release yet). Until the next
@@ -257,6 +259,16 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   throwaway program built with that poc takes this tree from source
   instead: `-clear-library-path -library-path <prefix>/lib/poc
   -import-path ~/Repos/Oberon/posockets/src`.
+- **Unix-domain sockets on Linux** (Phase 6): `sun_path` is 108
+  bytes, and a 107-byte path binds. With backlog 0 one connection
+  queues; a second non-blocking connect fails with `EAGAIN`, nothing in
+  progress, and `poll(POLLOUT)` returns at once (`POLLOUT|POLLHUP`), so
+  waiting on it is useless: `SocketTasks.ConnectUnix` sleeps and
+  retries. A blocking connect to a full queue waits. A stale socket
+  file gives `ECONNREFUSED`, no file `ENOENT`, binding over a file
+  `EADDRINUSE`. An accepted unnamed peer comes back with an empty host.
+- **`TestUnix` puts its socket files in `../build`** (tests run from
+  `test/`) and removes them, before and after, with `Platform.Unlink`.
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 

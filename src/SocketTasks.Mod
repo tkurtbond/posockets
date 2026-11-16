@@ -1,6 +1,7 @@
 MODULE SocketTasks; (* Sockets' operations, waiting through Tasks *)
 
-(* Accept, Connect, ConnectTo, Read, Write and WriteAll as in Sockets,
+(* Accept, Connect, ConnectTo, ConnectUnix, Read, Write and WriteAll as
+   in Sockets,
    but where Sockets on a non-blocking socket would give wouldBlock,
    these wait through Tasks (AwaitReadable, AwaitWritable) and try
    again, so other tasks run meanwhile. One OS thread can then serve
@@ -16,8 +17,8 @@ MODULE SocketTasks; (* Sockets' operations, waiting through Tasks *)
    only until then, and the call returns kind = timedOut; nothing is
    shut down, so the socket stays usable, and a caller may set another
    deadline and try again. A call that can finish without waiting does,
-   even past the deadline. Connect and ConnectTo, which make their
-   socket, take a time limit instead. Requires a poc whose Tasks has
+   even past the deadline. Connect, ConnectTo and ConnectUnix, which
+   make their socket, take a time limit instead. Requires a poc whose Tasks has
    AwaitReadableFor (after 0.12.0).
 
    Each wait is counted in the socket's waiters, so a Close from another
@@ -49,6 +50,18 @@ MODULE SocketTasks; (* Sockets' operations, waiting through Tasks *)
      Peaseblossom's PLAN.md, "Ongoing bug fixing", 21. *)
 
 IMPORT Sockets, Tasks;
+
+(* t appended to s, truncated to fit. *)
+PROCEDURE Append(VAR s: ARRAY OF CHAR; t: ARRAY OF CHAR);
+  VAR i, j: LONGINT;
+BEGIN
+  i := 0; WHILE (i < LEN(s)) & (s[i] # 0X) DO INC(i) END;
+  j := 0;
+  WHILE (i < LEN(s) - 1) & (j < LEN(t)) & (t[j] # 0X) DO
+    s[i] := t[j]; INC(i); INC(j)
+  END;
+  IF i < LEN(s) THEN s[i] := 0X END
+END Append;
 
 (* Halts unless s is open and non-blocking. *)
 PROCEDURE Check(s: Sockets.Socket);
@@ -102,19 +115,13 @@ BEGIN
   RETURN TRUE
 END Accept;
 
-(* A connection to one address, as Sockets.Resolve gives it, as a
-   non-blocking s, waiting while it is made: at most ms milliseconds,
-   or as long as the system tries if ms = 0 (on Linux about two minutes
-   for an address that never answers). On failure s is NIL and closed;
-   on success s has no deadline. Halts (Sockets.AssertArgument) for an
-   address that isn't inet or inet6, or a negative ms. *)
-PROCEDURE ConnectTo*(a: Sockets.Address; ms: LONGINT; VAR s: Sockets.Socket;
+(* Waits for s's connection, in progress, to be made, at most ms
+   milliseconds (0: no limit). On failure s is closed and NIL; on
+   success it has no deadline. *)
+PROCEDURE Finish(VAR s: Sockets.Socket; ms: LONGINT;
     VAR err: Sockets.Error): BOOLEAN;
   VAR ok: BOOLEAN;
 BEGIN
-  ASSERT(ms >= 0, Sockets.AssertArgument);
-  IF Sockets.ConnectTo(a, TRUE, s, err) THEN RETURN TRUE END;
-  IF err.kind # Sockets.wouldBlock THEN RETURN FALSE END;
   Sockets.SetDeadline(s, ms);
   REPEAT
     ok := Await(s, Sockets.wantWrite, "connect", err)
@@ -124,6 +131,20 @@ BEGIN
   ELSE Sockets.Close(s); s := NIL
   END;
   RETURN ok
+END Finish;
+
+(* A connection to one address, as Sockets.Resolve gives it, as a
+   non-blocking s, waiting while it is made: at most ms milliseconds,
+   or as long as the system tries if ms = 0 (on Linux about two minutes
+   for an address that never answers). On failure s is NIL and closed;
+   on success s has no deadline. Halts (Sockets.AssertArgument) for an
+   address that isn't inet or inet6, or a negative ms. *)
+PROCEDURE ConnectTo*(a: Sockets.Address; ms: LONGINT; VAR s: Sockets.Socket;
+    VAR err: Sockets.Error): BOOLEAN;
+BEGIN
+  ASSERT(ms >= 0, Sockets.AssertArgument);
+  IF Sockets.ConnectTo(a, TRUE, s, err) THEN RETURN TRUE END;
+  RETURN (err.kind = Sockets.wouldBlock) & Finish(s, ms, err)
 END ConnectTo;
 
 (* A connection to host and port, as a non-blocking s: each of host's
@@ -156,6 +177,44 @@ BEGIN
   END;
   RETURN FALSE
 END Connect;
+
+(* A Unix-domain connection to the listener at path, as a non-blocking
+   s, in at most ms milliseconds (0: no limit). On Linux a listener
+   whose queue is full refuses at once with EAGAIN, and its socket
+   can't be waited on (Sockets.ConnectUnix), so this sleeps (Tasks.Sleep), from 1 ms
+   doubling to 64 ms, and tries again, until there is room or ms has
+   passed: "connect to <path>: timed out". Any other failure, as
+   ECONNREFUSED for a stale socket file, comes back at once. Halts as
+   Sockets.ConnectUnix for the path, and (Sockets.AssertArgument) for a
+   negative ms. *)
+PROCEDURE ConnectUnix*(path: ARRAY OF CHAR; ms: LONGINT;
+    VAR s: Sockets.Socket; VAR err: Sockets.Error): BOOLEAN;
+  VAR end, left, pause: LONGINT; what: ARRAY 256 OF CHAR;
+BEGIN
+  ASSERT(ms >= 0, Sockets.AssertArgument);
+  end := Sockets.Now() + ms; pause := 1;
+  LOOP
+    IF Sockets.ConnectUnix(path, TRUE, s, err) THEN RETURN TRUE
+    ELSIF err.kind = Sockets.wouldBlock THEN
+      (* in progress, which Linux never gives *)
+      left := 0;
+      IF ms > 0 THEN left := end - Sockets.Now(); IF left < 1 THEN left := 1 END END;
+      RETURN Finish(s, left, err)
+    ELSIF (err.kind # Sockets.system) OR (err.code # Sockets.EAGAIN) THEN
+      RETURN FALSE
+    END;
+    IF ms > 0 THEN
+      left := end - Sockets.Now();
+      IF left <= 0 THEN
+        what := "connect to "; Append(what, path);
+        Sockets.TimedOut(NIL, err, what); RETURN FALSE
+      END;
+      IF pause > left THEN pause := left END
+    END;
+    Tasks.Sleep(pause);
+    IF pause < 64 THEN pause := pause * 2 END
+  END
+END ConnectUnix;
 
 (* Up to len bytes from s into buf[pos..pos+len-1], n of them, waiting
    until there is at least one or s's deadline passes; as Sockets.Read

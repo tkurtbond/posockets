@@ -81,6 +81,8 @@ int32_t errno_value(int32_t which)
 	case 5: return ENFILE;
 	case 6: return EAFNOSUPPORT;
 	case 7: return EADDRNOTAVAIL;
+	case 8: return ENOENT;
+	case 9: return EAGAIN;
 	default: return -1;
 	}
 }
@@ -806,6 +808,110 @@ int32_t ignore_sigpipe(void)
 	sa.sa_handler = SIG_IGN;
 	sigemptyset(&sa.sa_mask);
 	return sigaction(SIGPIPE, &sa, NULL) == 0 ? 0 : errno;
+}
+
+/* sun_path's size: a Unix-domain path, with its terminator, must fit
+   (108 bytes on Linux, 104 on the BSDs). */
+int32_t unix_path_max(void) NAME("unix-path-max");
+int32_t unix_path_max(void)
+{
+	return (int32_t)sizeof ((struct sockaddr_un *)0)->sun_path;
+}
+
+/* path as a sockaddr_un; Oberon has checked that it fits, terminator
+   included, and isn't empty. */
+static socklen_t unix_address(address path, address pathlen,
+			      struct sockaddr_un *un)
+{
+	size_t n = bounded_length((const char *)path, pathlen);
+
+	memset(un, 0, sizeof *un);
+	un->sun_family = AF_UNIX;
+	if (n >= sizeof un->sun_path)
+		n = sizeof un->sun_path - 1;
+	memcpy(un->sun_path, (const char *)path, n);
+	return (socklen_t)sizeof *un;
+}
+
+/* ListenUnix: a listening Unix-domain stream socket bound to path, in
+   *fd. The file bind makes is never removed here, and an existing one,
+   even a stale socket, makes bind fail with EADDRINUSE. Returns 0, or
+   the errno value with what saying what failed ("bind <path>"). */
+int32_t listen_unix(address path, address pathlen, int32_t backlog,
+		    int32_t nonblock, int64_t *fd, address what,
+		    address whatlen) NAME("listen-unix");
+int32_t listen_unix(address path, address pathlen, int32_t backlog,
+		    int32_t nonblock, int64_t *fd, address what,
+		    address whatlen)
+{
+	struct sockaddr_un un;
+	socklen_t len = unix_address(path, pathlen, &un);
+	const char *verb = "socket";
+	int s, e;
+
+	*fd = -1;
+	s = stream_socket(AF_UNIX, nonblock);
+	if (s < 0) {
+		e = errno;
+		goto failed;
+	}
+	verb = "bind";
+	if (bind(s, (struct sockaddr *)&un, len) != 0)
+		goto failed_fd;
+	verb = "listen on";
+	if (listen(s, backlog) != 0)
+		goto failed_fd;
+	*fd = s;
+	return 0;
+failed_fd:
+	e = errno;
+	close(s);
+failed:
+	if (whatlen > 0)
+		snprintf((char *)what, (size_t)whatlen, "%s %s", verb,
+			 un.sun_path);
+	return e;
+}
+
+/* ConnectUnix: a Unix-domain stream socket connected to path, in *fd.
+   A connection is queued at once or not at all: on Linux a non-blocking
+   connect to a listener whose queue is full fails with EAGAIN, nothing
+   in progress, and the socket polls writable at once, so waiting on it
+   is useless; the caller tries again later. That EAGAIN is returned as
+   itself, not WOULD_BLOCK. A blocking connect waits for room in the
+   queue; interrupted, it is simply made again, since nothing goes on
+   in the background (connect_outcome's poll would see the unconnected
+   socket writable and report success). EINPROGRESS, if a system gives
+   it, is WOULD_BLOCK, finished as TCP's is (not seen on Linux).
+   Returns 0, WOULD_BLOCK with *fd, or the errno value. */
+int32_t connect_unix(address path, address pathlen, int32_t nonblock,
+		     int64_t *fd) NAME("connect-unix");
+int32_t connect_unix(address path, address pathlen, int32_t nonblock,
+		     int64_t *fd)
+{
+	struct sockaddr_un un;
+	socklen_t len = unix_address(path, pathlen, &un);
+	int s, e;
+
+	*fd = -1;
+	s = stream_socket(AF_UNIX, nonblock);
+	if (s < 0)
+		return errno;
+	while (connect(s, (struct sockaddr *)&un, len) != 0) {
+		e = errno;
+		if (e == EINTR)
+			continue;
+		if (e == EISCONN)
+			break;
+		if (e == EINPROGRESS) {
+			*fd = s;
+			return WOULD_BLOCK;
+		}
+		close(s);
+		return e;
+	}
+	*fd = s;
+	return 0;
 }
 
 /* The monotonic clock in milliseconds, for deadlines: it never goes back

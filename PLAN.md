@@ -253,7 +253,19 @@ formats the number for `getaddrinfo` with `AI_NUMERICSERV`.
 - `ListenUnix(path, backlog, ...)`, `ConnectUnix(path, ...)`: the path
   is the caller's to remove; posockets never unlinks a file it didn't
   make, and doesn't remove a stale socket file before binding (an
-  `EADDRINUSE` error says so).
+  `EADDRINUSE` error says so). An empty path halts (84), one too long
+  for `sun_path` halts (83).
+- A Unix-domain connect never waits for the listener's `accept`: it is
+  queued at once. Only a full queue holds it, and then (on Linux) a
+  non-blocking connect fails with `EAGAIN`, nothing in progress, while
+  `poll` reports the socket writable at once (`POLLOUT|POLLHUP`), so
+  there is nothing to wait on. Decided 2026-11-15: `Sockets.ConnectUnix`
+  returns that `EAGAIN` as a system error with `s` NIL, not as
+  `wouldBlock`; `SocketTasks.ConnectUnix(path, ms, ...)` tries again
+  after a sleep (1 ms, doubling to 64 ms) until there is room or `ms`
+  passes (0: no limit), then times out. Should a system answer
+  `EINPROGRESS` (a BSD may), it waits through `Finish` as a TCP connect
+  does.
 - `Pair(VAR a, b, VAR err)`: `socketpair(AF_UNIX, SOCK_STREAM)`.
 
 ### Errors
@@ -479,6 +491,13 @@ Recorded as found, each with the `#ifdef` that handles it:
   times out. A BSD may refuse it instead or behave otherwise; if so,
   that check needs another way to stall a connect there (Phase 5).
 - `CLOCK_MONOTONIC` (`Sockets.-now`): POSIX, on all four.
+- A full Unix-domain listen queue (Phase 6): on Linux a non-blocking
+  connect fails with `EAGAIN` and a blocking one waits for room. What
+  the BSDs do is to be checked in the port (`ECONNREFUSED`, or
+  `EINPROGRESS`?); `TestUnix`'s full-queue checks assume Linux.
+- `sun_path` is `sizeof` in the C part (`Sockets.-unix-path-max`), so
+  `CheckPath`'s limit follows the system; `TestUnix`'s 107-byte path
+  and `HaltPath`'s 108 bytes are Linux's and need changing for 104.
 
 ### Halt codes
 
@@ -492,7 +511,7 @@ Recorded as found, each with the `#ifdef` that handles it:
 | 81 | a buffer range out of bounds (pos/len outside the array) |
 | 82 | a blocking socket given to a `SocketTasks` procedure |
 | 83 | a Unix-domain path too long for `sun_path` |
-| 84 | an argument out of range: port outside 0..65535, negative backlog, unknown `how` or family, a `listeners` or `addrs` array too small |
+| 84 | an argument out of range: port outside 0..65535, negative backlog, unknown `how` or family, a `listeners` or `addrs` array too small, an empty Unix-domain path, a negative time limit |
 | 85 | `Accept` on a socket that isn't listening, or I/O on one that is (`listening`) |
 | 86 | `Close` on a socket a `SocketTasks` call is waiting on (`waiters` > 0) |
 
@@ -532,8 +551,11 @@ valgrind with `poc-gc.supp`, and descriptors counted:
   when data comes in time; sockets usable after a timeout; `WriteAll`
   timing out partway; an accept loop stopping on a flag; connecting
   to a full queue timing out; the lingering close.
-- `TestUnix`: `Pair`, and a listener and client on a path under
-  `build/`.
+- `TestUnix` (Phase 6): `Pair`'s addresses; a listener and client on
+  a path under `build/`, blocking, then ten clients at once through
+  `SocketTasks` with small buffers; binding over a file, a stale file,
+  no file; a full queue (backlog 0); `Adopt` of a Unix listener; a
+  107-byte path.
 - Halt tests for every code in Halt codes.
 
 **A test meant to wait must make the wait happen, and show that it
@@ -862,10 +884,35 @@ Peaseblossom checkout (HEAD 73109d2 onward; it still calls itself
   ending by timeout, so the waits happened.
 - `make test` and `make valgrind` pass (TestDeadline in `TASKTESTS`).
 
-### Phase 6: Unix-domain sockets
+### Phase 6: Unix-domain sockets [done]
 
 `ListenUnix`, `ConnectUnix`, peer credentials (`SO_PEERCRED` on Linux,
 `getpeereid` on the BSDs) if a user wants them. `TestUnix`.
+
+Done 2026-11-15 (with the scratch poc of Phase 5):
+
+- Confirmed first by a throwaway C program on Linux: `sun_path` is 108
+  bytes, and a 107-byte path binds (`getsockname` gives length 110);
+  with backlog 0 the first non-blocking connect succeeds, the next
+  fails with `EAGAIN` (never `EINPROGRESS`), and `poll(POLLOUT)` on
+  that socket returns at once with `POLLOUT|POLLHUP`; a blocking
+  connect to the full queue waits (an alarm interrupted it after 1 s);
+  a stale socket file gives `ECONNREFUSED` in both modes, no file
+  `ENOENT`, binding over a file `EADDRINUSE`; an accepted unnamed
+  peer's address length is `sizeof(sa_family_t)`, 2.
+- `Sockets`: `ListenUnix(path, backlog, nonBlocking, VAR l, VAR err)`,
+  `ConnectUnix(path, nonBlocking, VAR s, VAR err)`, `ENOENT` and
+  `EAGAIN` among the exported codes; errors say "bind <path>: ..." and
+  "connect to <path>: ...". `TimedOut` takes a NIL socket.
+  `SocketTasks.ConnectUnix(path, ms, ...)`, retrying a full queue
+  (I/O). `ConnectTo`'s wait is factored into `Finish`, shared with it.
+- Peer credentials not done: no user has asked.
+- `TestUnix` as in Testing; `HaltPath` (83, 108 bytes) and
+  `HaltEmptyPath` (84). `strace -f -e trace=connect` showed 17 connects
+  ending in `EAGAIN`, so `SocketTasks.ConnectUnix` retried a full
+  queue; the echoes waited in `poll` as `TestTasks`'s do.
+- `make test` and `make valgrind` pass (TestUnix in `TASKTESTS`); no
+  socket file is left in `build/`.
 
 ### Phase 7: options
 
