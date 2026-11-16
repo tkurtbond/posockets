@@ -20,9 +20,10 @@ It is planned to offer:
 - errors from the network or the system returned as a result, never a
   halt.
 
-**Status: early.** Only the project skeleton (Phase 1 of
-[PLAN.md](PLAN.md)) is done: the build and tests work, but the
-`Sockets` module has no operations yet. PLAN.md has the design and the
+**Status: early.** Phases 1 and 2 of [PLAN.md](PLAN.md) are done:
+the build and tests, errors, addresses as text, resolving names
+(`Resolve`), and socket pairs (`Pair`, `Close`, `LocalAddress`,
+`PeerAddress`). Listening, accepting, connecting and I/O come next. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 ## Requirements

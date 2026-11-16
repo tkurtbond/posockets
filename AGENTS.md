@@ -30,10 +30,11 @@ behaviour of poc that applies here unchanged:
 
 ## Status
 
-As of 2026-11-15, Phase 1 (the skeleton) is done: the build, the test
-and valgrind runners, and `Sockets` with its types and constants but no
-operations yet. A probe confirmed the mechanisms the design rests on
-(see "Confirmed facts"). Next is Phase 2, errors and addresses.
+As of 2026-11-15, Phases 1 (the skeleton) and 2 (errors and
+addresses) are done: the build, the test and valgrind runners, and
+`Sockets` with its C part, `Error`, `Address`, `Resolve`, `Pair`,
+`Close`, `LocalAddress` and `PeerAddress`. Next is Phase 3, blocking
+TCP.
 
 ## Reference material
 
@@ -90,7 +91,9 @@ call stops every task, so a test that blocks runs its peer in a child
 process instead.
 
 `make valgrind` runs every test under valgrind with polibfyaml's
-`test/poc-gc.supp` and `test/vg-reachable.sh` copied here, and
+`test/poc-gc.supp` and `test/vg-reachable.sh` copied here (the latter
+also accepting the memory glibc's loader keeps for the NSS modules
+`getaddrinfo` loads with `dlopen`), and
 `--track-fds=yes`; `test/vg-fds.sh` fails a test that leaves a
 descriptor open (more open at exit than it inherited). A test may also
 check its own count through `/proc/self/fd`.
@@ -147,6 +150,21 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
 - **poc rejects `ASSERT(FALSE, n)`** at compile time ("ASSERT condition
   is always FALSE"); `b := FALSE; ASSERT(b, n)` compiles, and halts with
   status 10 and `assertion failed (n)`.
+- **An open array reaches a `["C"]` procedure as its first element's
+  address alone**, in any mode, so `Sockets` passes `LEN` beside it
+  (`host: ARRAY OF CHAR; hostLen: SYSTEM.ADDRESS`); a `VAR` scalar
+  (`VAR port: SYSTEM.INT32`) arrives as a pointer. Used throughout
+  `Sockets.c`, checked by `TestAddress`.
+- **`SYSTEM.INT64` is not assignable to `LONGINT`**, even under `-OC`
+  where both are 64 bits ("argument is not assignment compatible ...
+  SYSTEM.INT64 to LONGINT"); convert with `SYSTEM.VAL(LONGINT, x)`.
+  `SYSTEM.INT32` to `INTEGER` is accepted.
+- **glibc's `EAI_` codes are negative** (`EAI_NONAME` = -2,
+  `EAI_SYSTEM` = -11). `getaddrinfo` with no `AI_ADDRCONFIG` gives
+  `::1` then `127.0.0.1` for `localhost` and for a `NULL` host.
+- **`getaddrinfo` leaves memory still reachable at exit**: glibc
+  `dlopen`s the NSS modules and keeps them, so valgrind shows the
+  loader's blocks with stacks through `dl-open.c`.
 - **A library with no C part and no procedures** builds with `poc
   -library`, installs with `-install-library`, and a program built with
   `-library-path` at the install directory takes it from there, not

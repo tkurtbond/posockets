@@ -179,7 +179,9 @@ Scope ids (`fe80::1%eth0`) come back as `getnameinfo` writes them.
 bytes with its terminator); an IPv6 address with a scope id is at most
 `INET6_ADDRSTRLEN` (46) plus `%` and an interface name (`IF_NAMESIZE`,
 16), so it fits too. (It was 64 until 2026-11-15, too short for a
-path.) The sizes are to be checked in Phase 2.
+path.) Checked 2026-11-15 on Fedora 44: `sun_path` 108,
+`INET6_ADDRSTRLEN` 46, `IF_NAMESIZE` 16; `fe80::1%lo` came back as
+written.
 
 The peer of an accepted Unix-domain connection usually has no name
 (the client didn't `bind`); its `Address` then has family `unix` and
@@ -530,11 +532,12 @@ Still to confirm:
   says both work; Tasks, above.)
 - `shutdown(SHUT_RDWR)` from one task wakes another awaiting the same
   descriptor (how one task cuts off another's wait; Shutdown).
-- Passing an `ARRAY OF CHAR` host and a `VAR ARRAY OF CHAR` result
-  buffer to C, and the C part writing text back with a length limit.
-  The C part takes `LEN` of every array it reads as well, and stops at
-  `0X` or the length, so an array with no terminator can't make it
-  read past the end.
+- ~~Passing an `ARRAY OF CHAR` host and a `VAR ARRAY OF CHAR` result
+  buffer to C, and the C part writing text back with a length limit.~~
+  Done in Phase 2: an open array of any mode reaches a `["C"]`
+  procedure as its first element's address alone, so `LEN` is passed
+  beside it; the C part stops at `0X` or the length, and `snprintf`
+  truncates what it writes back (`TestAddress`).
 
 ### Phase 1: project skeleton [done]
 
@@ -564,18 +567,62 @@ Done 2026-11-15:
   `README.md`: what the library is and will offer, its status, how to
   build and install it; to be kept in step as the phases land.
 
-### Phase 2: errors and addresses
+### Phase 2: errors and addresses [done]
 
 `Error`, the C part's `errno`/`EAI_` handling and text, `Address`,
 `getnameinfo` text, `Pair`. `TestAddress` (the parts without
 listening), halt tests.
 
+Done 2026-11-15:
+
+- `src/Sockets.c`, the first C part: `error-text`, `errno-value`,
+  `sock-address`, `pair`, `close`, `resolve`. Each returns 0 or the
+  error code as its value.
+- `Error` with its kinds (`none`, `system`, `name`, `closed`,
+  `wouldBlock`, `timedOut`), `wantRead`/`wantWrite`, and `ClearError`.
+  A success clears the error. `text` is "`<what>`: `<message>`",
+  truncated to 255 characters: a 599-character host gave exactly 255.
+  The `errno` constants are read-only exported variables
+  (`ECONNREFUSED`, `ECONNRESET`, `EPIPE`, `EADDRINUSE`, `EMFILE`,
+  `ENFILE`, and `EAFNOSUPPORT`/`EADDRNOTAVAIL`, which `Listen` skips
+  families on), set from the C part at module load. glibc's `EAI_`
+  codes are negative (`EAI_NONAME` = -2), so `code` keeps its sign.
+- `strerror_r`: no feature macros in `Sockets.c` (`_POSIX_C_SOURCE`
+  would hide `SOCK_CLOEXEC` on the BSDs), so glibc gives the XSI
+  version unless the compiler defines `_GNU_SOURCE`; `error_text`
+  handles both, and compiled clean both ways.
+- `Address`, as designed. `Pair`, `Close`, and, taken forward from
+  Phase 3 because they need no listener, `LocalAddress`,
+  `PeerAddress` and `Resolve`. Phase 3 keeps the rest.
+- `Resolve` tries `AI_NUMERICHOST` first, then the name. It asks for
+  `SOCK_STREAM` and keeps only `AF_INET`/`AF_INET6` results. It does not
+  use `AI_ADDRCONFIG`, which in glibc ignores loopback addresses, so
+  `::1` would vanish on a machine with no other IPv6 address. An empty
+  host is `NULL` to `getaddrinfo`: the loopback addresses (`::1`,
+  `127.0.0.1`), or the wildcards for `Listen`'s `AI_PASSIVE`.
+  `localhost` gave `::1` then `127.0.0.1`. A canonical text comes back
+  (`2001:DB8:0:0::1` gave `2001:db8::1`), and `::ffff:1.2.3.4` stays
+  IPv6.
+- Halt tests: `HaltClosed` (80), `HaltPort` and `HaltAddrs` (84). The
+  rest of the codes come with the operations that check them.
+- `test/vg-reachable.sh` also accepts the dynamic loader's memory for
+  a `dlopen` (a stack through glibc's `dl-open.c`). `getaddrinfo` loads
+  the NSS modules that way and glibc keeps them loaded until exit, so
+  `TestAddress` showed about 7 KB of it still reachable. The check still
+  fails any other block, which was tested by renaming the allocator in
+  a log.
+- poc: `SYSTEM.INT64` isn't assignable to `LONGINT` even under `-OC`,
+  where they are the same size, so `Pair` converts with `SYSTEM.VAL`.
+  `SYSTEM.INT32` is assignable to `INTEGER`.
+- `make test` and `make valgrind` pass, with no leak and no descriptor
+  left open.
+
 ### Phase 3: blocking TCP
 
 `Listen` (with port 0 shared across families), `Accept`, `Connect`,
-`Resolve`, `ConnectTo`,
-`Read`, `Write`, `WriteAll`, `Shutdown`, `Close`, `LocalAddress`,
-`PeerAddress`, `Adopt`, `IgnoreBrokenPipe`. `TestAddress`,
+`ConnectTo`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Adopt`,
+`IgnoreBrokenPipe`. (`Resolve`, `Close`, `LocalAddress` and
+`PeerAddress` came in Phase 2.) `TestAddress`'s listening parts,
 `TestBlocking`, `TestErrors`.
 
 ### Phase 4: non-blocking and `SocketTasks`
