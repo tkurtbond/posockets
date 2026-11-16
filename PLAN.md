@@ -630,7 +630,7 @@ everywhere).
 
 ## Roadmap
 
-### Phase 0: spike and confirmations
+### Phase 0: spike and confirmations [done]
 
 Done 2026-11-15 (AGENTS.md, "Confirmed facts"): a C part beside its
 module compiles and links; `VAR ARRAY OF SYSTEM.INT32` reaches C as
@@ -640,15 +640,32 @@ added upstream; Deadlines).
 
 Still to confirm:
 
-- Whether poc's runtime sets or changes `SIGPIPE`'s disposition, or
-  any other signal a socket program cares about. (Read 2026-11-15:
-  `Platform` installs handlers only for `SIGINT`, `SIGQUIT` and
-  `SIGILL`, on request, with `SA_RESTART`, and none for `SIGPIPE`.)
+- ~~Whether poc's runtime sets or changes `SIGPIPE`'s disposition, or
+  any other signal a socket program cares about.~~ Done 2026-11-15, on
+  Linux and the BSDs with poc 0.13.0: it changes none. Its source
+  touches signals only in `Platform.SetHandler`, on request. A probe
+  read every signal's disposition and the blocked mask at start and
+  after tasks had waited on sockets: on Linux all were default and none
+  blocked; on the BSDs `SIGTSTP`, `SIGTTIN` and `SIGTTOU` were ignored
+  both times, and a plain C program run the same way showed the same,
+  so that is inherited from the non-interactive shell `ssh` runs.
 - ~~Two tasks awaiting one descriptor, one for reading and one for
   writing.~~ Done in Phase 4 (`TestTasks`).
-- `POLLHUP`/`POLLERR` waking `AwaitReadable`. (The source says so;
-  Tasks, above.) End of stream from the peer wakes it (Phase 4);
-  `POLLERR` alone not yet seen.
+- ~~`POLLHUP`/`POLLERR` waking `AwaitReadable`.~~ Done 2026-11-15,
+  on Linux and the BSDs with poc 0.13.0: `TaskWaiting.Ready` takes any
+  nonzero `revents`, and a task asleep in `AwaitReadableFor` woke when
+  the error came. Linux gives `POLLERR` alone on a connected UDP socket
+  after an ICMP port-unreachable (woke in 101 ms, `SO_ERROR`
+  `ECONNREFUSED`), and `POLLIN|POLLERR|POLLHUP` for a TCP reset or a
+  refused connect. The BSDs never gave `POLLERR` in these cases: the
+  UDP error is `POLLIN`, a reset `POLLIN|POLLHUP` (FreeBSD, OpenBSD) or
+  `POLLIN` (NetBSD), and a refused connect awaited for writing
+  `POLLOUT|POLLHUP` (FreeBSD), `POLLHUP` alone (OpenBSD) or `POLLOUT`
+  (NetBSD). Either way the waiter wakes, and the error is in
+  `SO_ERROR`, or from the next `recv`, which then clears `SO_ERROR`.
+  FreeBSD refused a non-blocking connect to a closed loopback port at
+  once (`ECONNREFUSED` from `connect`) 197 times in 200, and gave
+  `EINPROGRESS` the other 3; `Sockets` takes either.
 - ~~`shutdown(SHUT_RDWR)` from one task wakes another awaiting the same
   descriptor.~~ Done in Phase 4, on TCP (`TestTasks`).
 - ~~Passing an `ARRAY OF CHAR` host and a `VAR ARRAY OF CHAR` result

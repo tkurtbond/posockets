@@ -350,6 +350,22 @@ throwaway C programs or the tests:
   same; NetBSD returns 0, `poll` says readable, and `accept` gives
   `EAGAIN` (Linux: 0, `POLLHUP`, `EINVAL`). `Sockets.Shutdown` halts on
   a listener anyway.
+- **poc's runtime changes no signal's disposition or mask** (Linux and
+  the BSDs, poc 0.13.0): a probe read them all at start and after tasks
+  waited on sockets. Under `ssh` the BSDs show `SIGTSTP`, `SIGTTIN` and
+  `SIGTTOU` ignored, but a plain C program does too: it is inherited.
+- **Any poll event wakes a task's descriptor wait**, `POLLERR` alone
+  included (`TaskWaiting.Ready` takes any nonzero `revents`). Only Linux
+  gave `POLLERR`: alone on a connected UDP socket after an ICMP
+  port-unreachable, and with `POLLIN|POLLHUP` for a TCP reset or a
+  refused connect. The BSDs report the same errors as `POLLIN`, with
+  `POLLHUP` on FreeBSD and OpenBSD; a refused connect awaited for
+  writing is `POLLOUT|POLLHUP` on FreeBSD, `POLLHUP` alone on OpenBSD,
+  `POLLOUT` on NetBSD. The error is in `SO_ERROR`, or from the next
+  `recv`, which clears `SO_ERROR`.
+- **FreeBSD usually refuses a non-blocking loopback connect at once**:
+  `ECONNREFUSED` from `connect` 197 times in 200, `EINPROGRESS` the
+  other 3.
 - **`MSG_NOSIGNAL`, `accept4`, `SOCK_CLOEXEC`, `SOCK_NONBLOCK`** are in
   all three, with no feature macro; `TestErrors`' write to a reset peer
   gives `EPIPE` or `ECONNRESET`, never `SIGPIPE`.
