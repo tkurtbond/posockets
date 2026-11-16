@@ -212,7 +212,7 @@ PROCEDURE ConnectUnix*(path: ARRAY OF CHAR; nonBlocking: BOOLEAN;
     VAR s: Socket; VAR err: Error): BOOLEAN;
 ```
 
-A Unix-domain stream connection to the listener at path, as s, blocking unless nonBlocking. A connection is queued at once, so this never waits for the listener to accept; but when the listener's queue is full, a blocking connect waits for room (on Linux), and a non-blocking one fails with EAGAIN, nothing in progress, s NIL: try again later (SocketTasks.ConnectUnix does). No file at path gives ENOENT, a file with no listener (a stale socket) ECONNREFUSED: "connect to <path>: Connection refused". Halts as ListenUnix for the path.
+A Unix-domain stream connection to the listener at path, as s, blocking unless nonBlocking. A connection is queued at once, so this never waits for the listener to accept. When the listener's queue is full, systems differ: on Linux a blocking connect waits for room, and a non-blocking one fails with EAGAIN, nothing in progress, s NIL: try again later (SocketTasks.ConnectUnix does); on FreeBSD and NetBSD either is refused at once, ECONNREFUSED, as for a stale socket; OpenBSD queued every connection tried, 150 with backlog 0. No file at path gives ENOENT, a file with no listener (a stale socket) ECONNREFUSED: "connect to <path>: Connection refused". Halts as ListenUnix for the path.
 
 ### Deadlines
 

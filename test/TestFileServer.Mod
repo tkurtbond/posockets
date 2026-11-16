@@ -15,7 +15,6 @@ MODULE TestFileServer; (* examples/FileServer, with requests from here *)
 IMPORT Platform, Out, Coroutines, Tasks, Sockets, SocketTasks, Check, TestHelp, Run;
 
 CONST
-  Buffers = 4096;
   Timeout = 500;            (* the server's, ms *)
   Junk = 100000;            (* bytes sent after a request *)
   Stack = Coroutines.DefaultStackSize;
@@ -35,7 +34,8 @@ TYPE
   Writer = POINTER TO RECORD (Tasks.TaskDesc)
     r: Request;
     s: Sockets.Socket;
-    ok: BOOLEAN
+    ok: BOOLEAN;
+    why: ARRAY 256 OF CHAR  (* what failed, if not ok *)
   END;
   Watchdog = POINTER TO RECORD (Tasks.TaskDesc) END;
 
@@ -100,7 +100,8 @@ BEGIN
       sent := sent + LEN(buf)
     END
   END;
-  w.ok := w.ok & Sockets.Shutdown(w.s, Sockets.shutWrite, err)
+  w.ok := w.ok & Sockets.Shutdown(w.s, Sockets.shutWrite, err);
+  IF ~w.ok THEN COPY(err.text, w.why) END
 END Run;
 
 (* Sends the request from a Writer (unless it is ""), reading the reply
@@ -114,9 +115,6 @@ BEGIN
     COPY(err.text, r.why); RETURN
   END;
   t0 := Sockets.Now();
-  IF ~TestHelp.SmallBuffers(s.fd, Buffers) THEN
-    r.why := "SO_SNDBUF"; Sockets.Close(s); RETURN
-  END;
   IF r.text # "" THEN NEW(w); w.r := r; w.s := s; Tasks.Start(w, Stack) END;
   NEW(r.reply, 65536);
   Sockets.SetDeadline(s, 20000);
@@ -135,7 +133,7 @@ BEGIN
   IF ~r.ok THEN COPY(err.text, r.why) END;
   IF w # NIL THEN
     Tasks.Join(w);
-    IF ~w.ok THEN r.ok := FALSE; r.why := "the writer failed" END
+    IF ~w.ok THEN r.ok := FALSE; r.why := "the writer: "; Append(r.why, w.why) END
   END;
   Sockets.Close(s)
 END Run;

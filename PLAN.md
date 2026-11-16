@@ -308,10 +308,9 @@ prefix long.
   far, so the caller can resume. A `Read` with `len` = 0 returns at
   once with `n` = 0 and no error; only a read of 0 with `len` > 0 means
   `closed`.
-- Reads are `recv`, writes `send` with `MSG_NOSIGNAL` (Linux, and the
-  BSDs that have it; `SO_NOSIGPIPE` on those that don't, to be checked
-  in the port), so a write to a closed peer fails with `EPIPE` instead
-  of killing the program.
+- Reads are `recv`, writes `send` with `MSG_NOSIGNAL` (Linux and all
+  three BSDs have it, Phase 9), so a write to a closed peer fails with
+  `EPIPE` instead of killing the program.
 - `IgnoreBrokenPipe`: sets `SIGPIPE` to ignored process-wide. Needed
   when something else writes to the socket: libtls writes through
   OpenSSL, which uses `write`, out of posockets' reach. A program using
@@ -473,31 +472,61 @@ Recorded as found, each with the `#ifdef` that handles it:
 - `sun_path` size: 108 on Linux, 104 on the BSDs.
 - `errno` and `EAI_` numbers differ: always from the C part.
 - `accept4` in glibc's headers needs `_GNU_SOURCE`; `Sockets.c`
-  defines it under `#ifdef __linux__` only. Whether the BSDs need
-  anything is to be checked in the port.
+  defines it under `#ifdef __linux__` only. The BSDs need nothing: it
+  builds on all three (Phase 9).
 - `ENONET` (an `accept` error to retry) is Linux's; used under
   `#ifdef ENONET`.
 - `O_NONBLOCK` inheritance: a plain `accept` copies it from the
-  listener on the BSDs, not on Linux. `accept4` with explicit flags is
-  meant to make it the same everywhere; to be checked on each BSD.
+  listener on the BSDs, not on Linux. `accept4` with explicit flags
+  makes it the same everywhere: from a non-blocking listener,
+  `accept4(..., SOCK_CLOEXEC)` gave a blocking, close-on-exec socket
+  on all four (Phase 9).
 - `strerror_r`: glibc's GNU version returns a `char *` (maybe not the
-  buffer), the POSIX (XSI) one an `int`; the C part must handle both,
-  by feature macro or by `#ifdef __GLIBC__`.
-- `shutdown` on a listening socket: wakes a blocked `accept` with
-  `EINVAL` on Linux; on the BSDs it fails with `ENOTCONN` and wakes
-  nothing (to be confirmed; matters for stopping a server).
-- A full listen queue: on Linux a loopback connect past it hangs (the
-  SYN is dropped), which `TestDeadline` relies on for a connect that
-  times out. A BSD may refuse it instead or behave otherwise; if so,
-  that check needs another way to stall a connect there (Phase 5).
+  buffer), the POSIX (XSI) one an `int`; the C part handles both, by
+  `#ifdef` on glibc's feature macros. The BSDs take the POSIX one.
+- `shutdown` on a listening socket differs on every system (Phase 9):
+  Linux returns 0, `poll` gives `POLLHUP`, `accept` `EINVAL`; FreeBSD
+  returns `ENOTCONN` yet shuts it, `accept` then `ECONNABORTED`;
+  OpenBSD returns 0, `accept` `ECONNABORTED`; NetBSD returns 0, `poll`
+  says readable but `accept` gives `EAGAIN`, so a loop waiting to
+  accept would spin. posockets never does it: `Shutdown` on a listener
+  halts (`AssertListening`), and an accept loop stops by its deadline
+  (Deadlines).
+- A full TCP listen queue (Phase 9): on Linux, NetBSD and OpenBSD a
+  loopback connect past it hangs (the SYN is dropped), which
+  `TestDeadline` uses for a connect that times out; on FreeBSD it fails
+  at once with `ECONNRESET`, from `connect` itself. Backlog 0 queues
+  one connection on Linux and NetBSD, two on FreeBSD
+  (`kern.ipc.soacceptqueue` 128), 81 on OpenBSD (`kern.sominconn` 80).
+  `TestDeadline` connects until one doesn't, then takes either answer.
 - `CLOCK_MONOTONIC` (`Sockets.-now`): POSIX, on all four.
 - A full Unix-domain listen queue (Phase 6): on Linux a non-blocking
-  connect fails with `EAGAIN` and a blocking one waits for room. What
-  the BSDs do is to be checked in the port (`ECONNREFUSED`, or
-  `EINPROGRESS`?); `TestUnix`'s full-queue checks assume Linux.
+  connect fails with `EAGAIN` and a blocking one waits for room. On
+  FreeBSD and NetBSD backlog 0 queues one, and the next connect is
+  refused at once, `ECONNREFUSED`, the same as for a stale socket file,
+  so `SocketTasks.ConnectUnix` can't retry it there. OpenBSD queued all
+  of 200 tried with backlog 0 (Phase 9). `TestUnix` connects until one
+  doesn't, and checks what follows by the error.
 - `sun_path` is `sizeof` in the C part (`Sockets.-unix-path-max`), so
-  `CheckPath`'s limit follows the system; `TestUnix`'s 107-byte path
-  and `HaltPath`'s 108 bytes are Linux's and need changing for 104.
+  `CheckPath`'s limit follows the system. `TestUnix` takes the size
+  from `TestHelp.UnixPathMax` (the same `sizeof`) for its longest path;
+  `HaltPath`'s 108 bytes are too long everywhere.
+- Integer sizes on i386 (Phase 9): under `-OC`, `LEN` is a 64-bit
+  `LONGINT` while `SYSTEM.ADDRESS` is 32 bits, so a length passed to C
+  as an `ADDRESS` doesn't compile there. Lengths cross as
+  `SYSTEM.INT64` (`length` in `Sockets.c`), addresses of buffers as
+  `ADDRESS`.
+- Loopback delivery (Phase 9): on Linux, data sent over loopback is in
+  the peer's receive buffer when `send` returns; on the BSDs it arrives
+  a moment later. A test that sends and reads at once on the other end
+  first waits for it to be readable.
+- The loopback interface is `lo` on Linux, `lo0` on the BSDs (a scope
+  id in `TestAddress`).
+- `/proc/self/fd`: FreeBSD and OpenBSD have none, and NetBSD's counted
+  wrongly; `TestHelp.OpenFds` counts with `fcntl(F_GETFD)` instead.
+- NetBSD's resolver opens a `kqueue` on the first lookup that asks a
+  name server and keeps it; tests that resolve `nonexistent.invalid`
+  do so once before counting their descriptors.
 
 ### Halt codes
 
@@ -563,7 +592,13 @@ did.** The loopback's socket buffers are large: in Phase 4, 300,000
 bytes each way on 20 connections at once never made `send` return
 `EAGAIN`, so `TestTasks` passed without `SocketTasks` ever waiting.
 Asking for buffers of 4096 bytes on both ends
-(`TestHelp.SmallBuffers`) made it wait hundreds of times. A test of
+(`TestHelp.SmallBuffers`) made it wait hundreds of times. Since Phase
+9 only the send buffer is shrunk (`TestHelp.SmallSendBuffer`):
+shrinking `SO_RCVBUF` on a connected socket stalled large transfers on
+the BSDs until their deadlines, and with the send buffer alone Linux
+still waits hundreds of times (`strace`: 120 `EAGAIN`s in `TestTasks`,
+280 in `TestUnix`). A peer that never reads may still have a small
+receive buffer (`TestHelp.SmallReceiveBuffer`, `TestDeadline`). A test of
 waiting (Phase 5's deadlines too) uses small buffers, or a peer that
 holds back, and is checked once with `strace -f -e trace=sendto,recvfrom,poll`
 to see the `EAGAIN`s and `poll`s, the count noted here.
@@ -868,7 +903,8 @@ Peaseblossom checkout (HEAD 73109d2 onward; it still calls itself
   (`tcp_syncookies` = 1, `tcp_abort_on_overflow` = 0 on the test
   host), so the connect neither completes nor is refused. `TestDeadline`
   uses this for a connect that times out without reaching outside the
-  machine. Unknown on the BSDs (Portability; Phase 9).
+  machine. NetBSD and OpenBSD do the same; FreeBSD resets the connect
+  at once (Portability; Phase 9).
 - `TestDeadline` (21 checks), with a watchdog: a `Read` cut off near
   its deadline, then the same socket reading what comes in time; a
   deadline already past still taking data that is there; 0 clearing a
@@ -1011,10 +1047,39 @@ Done 2026-11-15 (with the scratch poc of Phase 5):
 - `make test` and `make valgrind` pass, the example tests in
   `TASKTESTS`.
 
-### Phase 9: BSD port
+### Phase 9: BSD port [done]
 
 Build and test on the BSD hosts (as pofltk does; AGENTS.md); fix each
 difference behind an `#ifdef` and add it to Portability.
+
+Done on 2026-11-15 with poc 0.13.0 on FreeBSD 15.1 (amd64, alerik),
+OpenBSD 7.9 (i386, cymoril; amd64, jherek) and NetBSD 11.0 (amd64,
+artos; i386, yishana): `gmake test` passes on all five, and `make
+test` and `make valgrind` on Linux. The library needed one change, and
+no `#ifdef`: lengths cross to C as `SYSTEM.INT64`, since on i386 `LEN`
+doesn't fit an `ADDRESS` (Portability). Everything else that differs
+is the system's own answer, which posockets passes on, so the tests
+were made to take each system's answer, and the comments and README
+("Differences between systems") say what they are:
+
+- A full listen queue, TCP and Unix-domain (Portability). On FreeBSD
+  and NetBSD, `SocketTasks.ConnectUnix` can't wait for room in a full
+  queue, since the refusal is the same as for a stale socket file.
+- Small receive buffers stall transfers on the BSDs (Testing):
+  `TestHelp.SmallBuffers` became `SmallSendBuffer` and
+  `SmallReceiveBuffer`.
+- `TestFileServer`'s client no longer shrinks its send buffer: on
+  FreeBSD, 4096 bytes made its 100,000 bytes after the request take
+  about 3 s (`net.inet.tcp.delacktime` 40 ms), longer than
+  `FileServer`'s 2 s lingering close, which then closed and the client
+  got `EPIPE`. Without it the case still fails on Linux when
+  `FileServer` closes without lingering, as it should; on FreeBSD
+  such a close didn't lose the answer.
+- Loopback delivery, `lo0`, `/proc/self/fd`, NetBSD's resolver
+  descriptor, `sun_path`'s size (Portability).
+- `TestUnix` used to halt on the BSDs at its 107-byte path, and the
+  run's count of `FAIL` lines missed it: a host's run is judged by
+  make's exit status, and halts are counted too.
 
 ## Open questions
 

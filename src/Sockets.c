@@ -49,6 +49,9 @@
 #define NAME(n) __asm__("Sockets.-" n)
 
 typedef intptr_t address;
+/* A length or size from Oberon: LEN(a) is a LONGINT, 64 bits under -OC
+   even on a 32-bit system, where an address is 32. */
+typedef int64_t length;
 
 /* Families as Oberon numbers them (Sockets.inet, inet6, unix). */
 enum { FAM_INET = 1, FAM_INET6 = 2, FAM_UNIX = 3 };
@@ -87,7 +90,7 @@ int32_t errno_value(int32_t which)
 	}
 }
 
-static size_t bounded_length(const char *s, address len)
+static size_t bounded_length(const char *s, length len)
 {
 	return len <= 0 ? 0 : strnlen(s, (size_t)len);
 }
@@ -95,10 +98,10 @@ static size_t bounded_length(const char *s, address len)
 /* Writes "<what>: <message>" into text (textlen bytes, terminator
    included), truncating, never overflowing. A system error's message is
    strerror_r's, a name error's gai_strerror's. */
-void error_text(int32_t kind, int32_t code, address what, address whatlen,
-		address text, address textlen) NAME("error-text");
-void error_text(int32_t kind, int32_t code, address what, address whatlen,
-		address text, address textlen)
+void error_text(int32_t kind, int32_t code, address what, length whatlen,
+		address text, length textlen) NAME("error-text");
+void error_text(int32_t kind, int32_t code, address what, length whatlen,
+		address text, length textlen)
 {
 	char buf[256];
 	const char *msg;
@@ -176,10 +179,10 @@ static int32_t from_sockaddr(const struct sockaddr *sa, socklen_t salen,
 /* The socket's own address (which = 0, getsockname) or its peer's
    (which = 1, getpeername). Returns 0, or the errno value. */
 int32_t sock_address(int64_t fd, int32_t which, int32_t *family,
-		     address host, address hostlen, int32_t *port)
+		     address host, length hostlen, int32_t *port)
 	NAME("sock-address");
 int32_t sock_address(int64_t fd, int32_t which, int32_t *family,
-		     address host, address hostlen, int32_t *port)
+		     address host, length hostlen, int32_t *port)
 {
 	struct sockaddr_storage ss;
 	socklen_t len = sizeof ss;
@@ -223,7 +226,7 @@ int32_t close_fd(int64_t fd)
    AI_NUMERICHOST, so it never consults a name server. Returns 0, or the
    kind with *code: EAI_SYSTEM is reported as a system error with its
    errno, any other failure as a name error with getaddrinfo's code. */
-static int32_t lookup(address host, address hostlen, int32_t port,
+static int32_t lookup(address host, length hostlen, int32_t port,
 		      int passive, struct addrinfo **res, int32_t *code)
 {
 	char name[NI_MAXHOST], serv[16];
@@ -273,7 +276,7 @@ static int inet_family(const struct addrinfo *ai)
 /* Writes "<verb> <numeric address> port <port>" into what, for an
    error's text. */
 static void describe(const char *verb, const struct sockaddr *sa,
-		     socklen_t salen, address what, address whatlen)
+		     socklen_t salen, address what, length whatlen)
 {
 	char host[NI_MAXHOST];
 	int32_t family, port;
@@ -290,12 +293,12 @@ static void describe(const char *verb, const struct sockaddr *sa,
    as family, numeric host text and port: hosts is max rows of stride
    bytes each. *count receives how many there are, which may be more
    than max (Oberon halts then). Returns 0, or the kind with *code. */
-int32_t resolve(address host, address hostlen, int32_t port, int32_t passive,
-		int32_t *families, address hosts, address stride,
+int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
+		int32_t *families, address hosts, length stride,
 		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
 	NAME("resolve");
-int32_t resolve(address host, address hostlen, int32_t port, int32_t passive,
-		int32_t *families, address hosts, address stride,
+int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
+		int32_t *families, address hosts, length stride,
 		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
 {
 	struct addrinfo *res, *ai;
@@ -380,15 +383,15 @@ static int stream_socket(int family, int nonblock)
    Returns 0; TOO_MANY with *count the addresses found, when more than
    max; or the kind with *code, and what saying what failed
    ("bind ::1 port 1965"). */
-int32_t listen_on(address host, address hostlen, int32_t port,
+int32_t listen_on(address host, length hostlen, int32_t port,
 		  int32_t backlog, int32_t nonblock, int64_t *fds,
 		  int32_t *families, int32_t max, int32_t *count,
-		  int32_t *code, address what, address whatlen)
+		  int32_t *code, address what, length whatlen)
 	NAME("listen");
-int32_t listen_on(address host, address hostlen, int32_t port,
+int32_t listen_on(address host, length hostlen, int32_t port,
 		  int32_t backlog, int32_t nonblock, int64_t *fds,
 		  int32_t *families, int32_t max, int32_t *count,
-		  int32_t *code, address what, address whatlen)
+		  int32_t *code, address what, length whatlen)
 {
 	struct addrinfo *res, *ai;
 	struct addrinfo *addrs[MAX_LISTEN];
@@ -529,10 +532,10 @@ static int connection_error(int e)
    loop never stops because one client gave up. EMFILE and ENFILE are
    reported, never retried (PLAN.md, I/O). */
 int32_t accept_conn(int64_t fd, int32_t nonblock, int64_t *newfd,
-		    int32_t *family, address host, address hostlen,
+		    int32_t *family, address host, length hostlen,
 		    int32_t *port) NAME("accept");
 int32_t accept_conn(int64_t fd, int32_t nonblock, int64_t *newfd,
-		    int32_t *family, address host, address hostlen,
+		    int32_t *family, address host, length hostlen,
 		    int32_t *port)
 {
 	struct sockaddr_storage ss;
@@ -614,12 +617,12 @@ static int connect_one(const struct sockaddr *sa, socklen_t salen,
 /* Connect (blocking): tries each TCP address of host in getaddrinfo's
    order until one connects, and reports the last error. Returns 0 with
    *fd and *family; or the kind with *code and what. */
-int32_t connect_host(address host, address hostlen, int32_t port,
+int32_t connect_host(address host, length hostlen, int32_t port,
 		     int64_t *fd, int32_t *family, int32_t *code,
-		     address what, address whatlen) NAME("connect");
-int32_t connect_host(address host, address hostlen, int32_t port,
+		     address what, length whatlen) NAME("connect");
+int32_t connect_host(address host, length hostlen, int32_t port,
 		     int64_t *fd, int32_t *family, int32_t *code,
-		     address what, address whatlen)
+		     address what, length whatlen)
 {
 	struct addrinfo *res, *ai;
 	int32_t kind;
@@ -651,9 +654,9 @@ int32_t connect_host(address host, address hostlen, int32_t port,
 /* ConnectTo: one numeric address, as Resolve gives it. Returns 0 with
    *fd, WOULD_BLOCK with *fd when nonblock and the connection is in
    progress, or the errno value. */
-int32_t connect_to(address host, address hostlen, int32_t port,
+int32_t connect_to(address host, length hostlen, int32_t port,
 		   int32_t nonblock, int64_t *fd) NAME("connect-to");
-int32_t connect_to(address host, address hostlen, int32_t port,
+int32_t connect_to(address host, length hostlen, int32_t port,
 		   int32_t nonblock, int64_t *fd)
 {
 	char name[NI_MAXHOST], serv[16];
@@ -820,7 +823,7 @@ int32_t unix_path_max(void)
 
 /* path as a sockaddr_un; Oberon has checked that it fits, terminator
    included, and isn't empty. */
-static socklen_t unix_address(address path, address pathlen,
+static socklen_t unix_address(address path, length pathlen,
 			      struct sockaddr_un *un)
 {
 	size_t n = bounded_length((const char *)path, pathlen);
@@ -837,12 +840,12 @@ static socklen_t unix_address(address path, address pathlen,
    *fd. The file bind makes is never removed here, and an existing one,
    even a stale socket, makes bind fail with EADDRINUSE. Returns 0, or
    the errno value with what saying what failed ("bind <path>"). */
-int32_t listen_unix(address path, address pathlen, int32_t backlog,
+int32_t listen_unix(address path, length pathlen, int32_t backlog,
 		    int32_t nonblock, int64_t *fd, address what,
-		    address whatlen) NAME("listen-unix");
-int32_t listen_unix(address path, address pathlen, int32_t backlog,
+		    length whatlen) NAME("listen-unix");
+int32_t listen_unix(address path, length pathlen, int32_t backlog,
 		    int32_t nonblock, int64_t *fd, address what,
-		    address whatlen)
+		    length whatlen)
 {
 	struct sockaddr_un un;
 	socklen_t len = unix_address(path, pathlen, &un);
@@ -884,9 +887,9 @@ failed:
    socket writable and report success). EINPROGRESS, if a system gives
    it, is WOULD_BLOCK, finished as TCP's is (not seen on Linux).
    Returns 0, WOULD_BLOCK with *fd, or the errno value. */
-int32_t connect_unix(address path, address pathlen, int32_t nonblock,
+int32_t connect_unix(address path, length pathlen, int32_t nonblock,
 		     int64_t *fd) NAME("connect-unix");
-int32_t connect_unix(address path, address pathlen, int32_t nonblock,
+int32_t connect_unix(address path, length pathlen, int32_t nonblock,
 		     int64_t *fd)
 {
 	struct sockaddr_un un;

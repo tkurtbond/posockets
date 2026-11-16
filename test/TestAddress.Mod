@@ -86,9 +86,15 @@ BEGIN
   ok := Sockets.Resolve("2001:DB8:0:0::1", 65535, addrs, n, err);
   Check.Check(ok & (n = 1) & (addrs[0].host = "2001:db8::1")
     & (addrs[0].port = 65535), "an IPv6 address comes back in canonical text");
+  (* The loopback interface: lo on Linux, lo0 on the BSDs *)
   ok := Sockets.Resolve("fe80::1%lo", 1, addrs, n, err);
-  Check.Check(ok & (n = 1) & (addrs[0].host = "fe80::1%lo"),
-    "a scope id comes back as getnameinfo writes it");
+  IF ok THEN
+    ok := (n = 1) & (addrs[0].host = "fe80::1%lo")
+  ELSE
+    ok := Sockets.Resolve("fe80::1%lo0", 1, addrs, n, err)
+      & (n = 1) & (addrs[0].host = "fe80::1%lo0")
+  END;
+  Check.Check(ok, "a scope id comes back as getnameinfo writes it");
 
   (* localhost and the empty host: loopback addresses only *)
   ok := Sockets.Resolve("localhost", 0, addrs, n, err);

@@ -28,19 +28,18 @@ non-blocking sockets, and `SocketTasks`, which waits through poc's
 `Tasks` so one thread serves many connections, with deadlines on its
 waits, time limits on connecting, and a lingering close; and
 Unix-domain stream sockets (`ListenUnix`, `ConnectUnix`); and
-examples and a reference. Socket options wait for a program that needs
-them; the BSD port comes next. PLAN.md has the design and the
+examples and a reference; on Linux, FreeBSD, OpenBSD and NetBSD.
+Socket options wait for a program that needs them. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 ## Requirements
 
-- A poc newer than 0.12.0, on Linux: the deadlines need
-  `Tasks.AwaitReadableFor`, which is in Peaseblossom's source but in
-  no poc release yet, so for now build poc from that source and pass
-  it to make (`make test POC=/path/to/poc`). poc 0.12.0 builds the
-  Phase 4 version (commit 72e218a). The BSDs that poc supports are to
-  follow (PLAN.md, Phase 9).
-- valgrind, for `make valgrind`.
+- poc 0.13.0 or later: the deadlines need `Tasks.AwaitReadableFor`.
+  poc 0.12.0 builds the Phase 4 version (commit 72e218a).
+- Linux, FreeBSD, OpenBSD or NetBSD, on amd64 or i386: tested on
+  Fedora 44, FreeBSD 15.1, OpenBSD 7.9 and NetBSD 11.0 (PLAN.md,
+  Phase 9). On the BSDs, build with GNU make (`gmake`).
+- valgrind, for `make valgrind` (Linux).
 
 The library links nothing beyond the C library, so a program using it
 needs no extra flags.
@@ -69,6 +68,10 @@ Two things a program using `SocketTasks` meets that come from poc's
   with `EAGAIN` and no socket, with nothing to wait on.
   `SocketTasks.ConnectUnix` retries for you, sleeping from 1 ms
   doubling to 64 ms, until there is room or its time limit passes.
+  On FreeBSD and NetBSD a full queue refuses the connect at once with
+  `ECONNREFUSED`, which can't be told from a stale socket file, so
+  nothing retries it there; give a listener a backlog to suit its
+  clients. OpenBSD queued every connection tried, 150 with backlog 0.
 - **Other failures come back at once:** `ENOENT` when there is no file
   at the path, `ECONNREFUSED` when the file is a stale socket with no
   listener.
@@ -76,6 +79,25 @@ Two things a program using `SocketTasks` meets that come from poc's
   one, or an empty one, is a programmer error and halts.
 - **The peer of an accepted connection is usually unnamed**: its
   address has family `unix` and an empty host.
+
+## Differences between systems
+
+Found in porting (PLAN.md, Phase 9); the library hides none of them,
+since each is the system's own answer:
+
+- **A TCP connect to a full listen queue** hangs on Linux, OpenBSD and
+  NetBSD until its time limit (the SYN is dropped); on FreeBSD it fails
+  at once with `ECONNRESET`. How many connections a backlog of 0
+  queues differs too: one on Linux and NetBSD, two on FreeBSD, 81 on
+  OpenBSD (`kern.sominconn`).
+- **A Unix-domain connect to a full queue**: see above.
+- **The BSDs' loopback delivers data a moment after `send` returns**;
+  Linux's has it there already. A program that writes and then, with
+  its deadline passed, reads at once on the other end may find nothing
+  yet.
+- **The NetBSD resolver keeps a descriptor** (a `kqueue`) after a
+  lookup that asks a name server, as glibc keeps the NSS modules'
+  memory.
 
 ## Reference
 

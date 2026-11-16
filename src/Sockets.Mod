@@ -112,34 +112,34 @@ VAR
 
 PROCEDURE ["C", "Sockets.-errno-value"] CErrnoValue(which: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-error-text"] CErrorText(kind, code: SYSTEM.INT32;
-  what: ARRAY OF CHAR; whatLen: SYSTEM.ADDRESS;
-  VAR text: ARRAY OF CHAR; textLen: SYSTEM.ADDRESS);
+  what: ARRAY OF CHAR; whatLen: SYSTEM.INT64;
+  VAR text: ARRAY OF CHAR; textLen: SYSTEM.INT64);
 PROCEDURE ["C", "Sockets.-sock-address"] CSockAddress(fd: SYSTEM.INT64;
   which: SYSTEM.INT32; VAR family: SYSTEM.INT32;
-  VAR host: ARRAY OF CHAR; hostLen: SYSTEM.ADDRESS;
+  VAR host: ARRAY OF CHAR; hostLen: SYSTEM.INT64;
   VAR port: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-pair"] CPair(VAR fds: ARRAY OF SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-close"] CClose(fd: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-resolve"] CResolve(host: ARRAY OF CHAR;
-  hostLen: SYSTEM.ADDRESS; port, passive: SYSTEM.INT32;
+  hostLen: SYSTEM.INT64; port, passive: SYSTEM.INT32;
   VAR families: ARRAY OF SYSTEM.INT32; VAR hosts: ARRAY OF CHAR;
-  stride: SYSTEM.ADDRESS; VAR ports: ARRAY OF SYSTEM.INT32;
+  stride: SYSTEM.INT64; VAR ports: ARRAY OF SYSTEM.INT32;
   max: SYSTEM.INT32; VAR count, code: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-listen"] CListen(host: ARRAY OF CHAR;
-  hostLen: SYSTEM.ADDRESS; port, backlog, nonBlocking: SYSTEM.INT32;
+  hostLen: SYSTEM.INT64; port, backlog, nonBlocking: SYSTEM.INT32;
   VAR fds: ARRAY OF SYSTEM.INT64; VAR families: ARRAY OF SYSTEM.INT32;
   max: SYSTEM.INT32; VAR count, code: SYSTEM.INT32;
-  VAR what: ARRAY OF CHAR; whatLen: SYSTEM.ADDRESS): SYSTEM.INT32;
+  VAR what: ARRAY OF CHAR; whatLen: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-accept"] CAccept(fd: SYSTEM.INT64;
   nonBlocking: SYSTEM.INT32; VAR newFd: SYSTEM.INT64;
   VAR family: SYSTEM.INT32; VAR host: ARRAY OF CHAR;
-  hostLen: SYSTEM.ADDRESS; VAR port: SYSTEM.INT32): SYSTEM.INT32;
+  hostLen: SYSTEM.INT64; VAR port: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-connect"] CConnect(host: ARRAY OF CHAR;
-  hostLen: SYSTEM.ADDRESS; port: SYSTEM.INT32; VAR fd: SYSTEM.INT64;
+  hostLen: SYSTEM.INT64; port: SYSTEM.INT32; VAR fd: SYSTEM.INT64;
   VAR family, code: SYSTEM.INT32;
-  VAR what: ARRAY OF CHAR; whatLen: SYSTEM.ADDRESS): SYSTEM.INT32;
+  VAR what: ARRAY OF CHAR; whatLen: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-connect-to"] CConnectTo(host: ARRAY OF CHAR;
-  hostLen: SYSTEM.ADDRESS; port, nonBlocking: SYSTEM.INT32;
+  hostLen: SYSTEM.INT64; port, nonBlocking: SYSTEM.INT32;
   VAR fd: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-finish-connect"] CFinishConnect(fd: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-recv"] CRecv(fd: SYSTEM.INT64; buf: SYSTEM.ADDRESS;
@@ -155,11 +155,11 @@ PROCEDURE ["C", "Sockets.-ignore-sigpipe"] CIgnoreSigpipe(): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-now"] CNow(): SYSTEM.INT64;
 PROCEDURE ["C", "Sockets.-unix-path-max"] CUnixPathMax(): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-listen-unix"] CListenUnix(path: ARRAY OF CHAR;
-  pathLen: SYSTEM.ADDRESS; backlog, nonBlocking: SYSTEM.INT32;
+  pathLen: SYSTEM.INT64; backlog, nonBlocking: SYSTEM.INT32;
   VAR fd: SYSTEM.INT64; VAR what: ARRAY OF CHAR;
-  whatLen: SYSTEM.ADDRESS): SYSTEM.INT32;
+  whatLen: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-connect-unix"] CConnectUnix(path: ARRAY OF CHAR;
-  pathLen: SYSTEM.ADDRESS; nonBlocking: SYSTEM.INT32;
+  pathLen: SYSTEM.INT64; nonBlocking: SYSTEM.INT32;
   VAR fd: SYSTEM.INT64): SYSTEM.INT32;
 
 (* Text building, for an Error's prefix *)
@@ -539,12 +539,15 @@ END ListenUnix;
 
 (* A Unix-domain stream connection to the listener at path, as s,
    blocking unless nonBlocking. A connection is queued at once, so this
-   never waits for the listener to accept; but when the listener's queue
-   is full, a blocking connect waits for room (on Linux), and a
-   non-blocking one fails with EAGAIN, nothing in progress, s NIL: try
-   again later (SocketTasks.ConnectUnix does). No file at path gives
-   ENOENT, a file with no listener (a stale socket) ECONNREFUSED: "connect
-   to <path>: Connection refused". Halts as ListenUnix for the path. *)
+   never waits for the listener to accept. When the listener's queue is
+   full, systems differ: on Linux a blocking connect waits for room, and
+   a non-blocking one fails with EAGAIN, nothing in progress, s NIL: try
+   again later (SocketTasks.ConnectUnix does); on FreeBSD and NetBSD
+   either is refused at once, ECONNREFUSED, as for a stale socket;
+   OpenBSD queued every connection tried, 150 with backlog 0. No file at
+   path gives ENOENT, a file with no listener (a stale socket)
+   ECONNREFUSED: "connect to <path>: Connection refused". Halts as
+   ListenUnix for the path. *)
 PROCEDURE ConnectUnix*(path: ARRAY OF CHAR; nonBlocking: BOOLEAN;
     VAR s: Socket; VAR err: Error): BOOLEAN;
   VAR fd: SYSTEM.INT64; r: SYSTEM.INT32; a: Address; what: ARRAY 256 OF CHAR;

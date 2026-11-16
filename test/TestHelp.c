@@ -1,14 +1,13 @@
 /* TestHelp.c -- the C part of TestHelp: what the tests need from the
-   system that posockets doesn't offer (PLAN.md, "Testing"). Linux only
-   for now: OpenFds reads /proc/self/fd. */
+   system that posockets doesn't offer (PLAN.md, "Testing"). */
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdint.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #define NAME(n) __asm__("TestHelp.-" n)
@@ -47,16 +46,24 @@ int32_t reset_on_close(int64_t fd)
 	return setsockopt((int)fd, SOL_SOCKET, SO_LINGER, &l, sizeof l);
 }
 
-/* Asks for send and receive buffers of bytes each; the kernel may
-   round up (Linux doubles it, and has a minimum). */
-int32_t small_buffers(int64_t fd, int32_t bytes) NAME("small-buffers");
-int32_t small_buffers(int64_t fd, int32_t bytes)
+/* Asks for a buffer of bytes on fd: the send buffer if receive is 0,
+   otherwise the receive buffer. The kernel may round up (Linux doubles
+   it, and has a minimum). */
+int32_t small_buffer(int64_t fd, int32_t bytes, int32_t receive) NAME("small-buffer");
+int32_t small_buffer(int64_t fd, int32_t bytes, int32_t receive)
 {
 	int b = bytes;
 
-	if (setsockopt((int)fd, SOL_SOCKET, SO_SNDBUF, &b, sizeof b) != 0)
-		return -1;
-	return setsockopt((int)fd, SOL_SOCKET, SO_RCVBUF, &b, sizeof b);
+	return setsockopt((int)fd, SOL_SOCKET, receive ? SO_RCVBUF : SO_SNDBUF,
+	    &b, sizeof b);
+}
+
+/* sun_path's size, its terminator included: 108 on Linux, 104 on the
+   BSDs. */
+int32_t unix_path_max(void) NAME("unix-path-max");
+int32_t unix_path_max(void)
+{
+	return (int32_t)sizeof ((struct sockaddr_un *)0)->sun_path;
 }
 
 /* RLIMIT_NOFILE's soft limit, or -1. */
@@ -82,22 +89,25 @@ int32_t set_file_limit(int64_t n)
 	return setrlimit(RLIMIT_NOFILE, &r);
 }
 
-/* The number of descriptors open, from /proc/self/fd, not counting the
-   one opendir uses; -1 on error. */
+/* The number of descriptors open: those below the soft RLIMIT_NOFILE
+   (at most MAX_FDS) that fcntl knows. Portable, unlike /proc/self/fd,
+   which FreeBSD and OpenBSD don't have. A test's descriptors are the
+   lowest free numbers, far below the cap. */
+#define MAX_FDS 65536
 int32_t open_fds(void) NAME("open-fds");
 int32_t open_fds(void)
 {
-	DIR *d = opendir("/proc/self/fd");
-	struct dirent *e;
-	int n = 0;
+	struct rlimit r;
+	long fd, top = MAX_FDS;
+	int32_t n = 0;
 
-	if (d == NULL)
-		return -1;
-	while ((e = readdir(d)) != NULL)
-		if (e->d_name[0] != '.')
+	if (getrlimit(RLIMIT_NOFILE, &r) == 0 && r.rlim_cur != RLIM_INFINITY
+	    && r.rlim_cur < (rlim_t)top)
+		top = (long)r.rlim_cur;
+	for (fd = 0; fd < top; fd++)
+		if (fcntl((int)fd, F_GETFD) != -1)
 			n++;
-	closedir(d);
-	return n - 1;
+	return n;
 }
 
 /* /dev/null opened for reading, close-on-exec: a descriptor that isn't

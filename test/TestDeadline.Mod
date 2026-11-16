@@ -5,9 +5,9 @@ MODULE TestDeadline; (* SocketTasks' deadlines and the lingering close *)
    is usable after a timeout; a deadline already past still takes what
    is there; a WriteAll to a peer that doesn't read times out saying how
    much it wrote; an accept loop with a short deadline stops soon after
-   it is told to; a connect to a listener whose queue is full times out,
-   naming the address; the lingering close, with a peer that closes and
-   one that doesn't. Each wait is made to happen (PLAN.md, "Testing"):
+   it is told to; a connect to a listener whose queue is full times out
+   (or, on FreeBSD, is reset at once), naming the address; the
+   lingering close, with a peer that closes and one that doesn't. Each wait is made to happen (PLAN.md, "Testing"):
    nothing is sent, or the peer's buffers are small and it doesn't
    read. All over 127.0.0.1. A watchdog task ends the program if
    anything waits too long. *)
@@ -18,6 +18,7 @@ CONST
   Stack = Coroutines.DefaultStackSize;
   Patience = 30000;        (* ms the watchdog allows the whole test *)
   Slack = 500;             (* ms a timed wait may run late on a busy machine *)
+  Fill = 150;              (* connections tried at most, to fill a queue *)
 
 TYPE
   (* Writes "x" to s after ms, then closes s if close is set. *)
@@ -39,6 +40,8 @@ TYPE
 VAR
   l, c, s, c2, s2: Sockets.Socket;
   ls: ARRAY 2 OF Sockets.Socket;
+  cs: ARRAY Fill + 1 OF Sockets.Socket;   (* the connections filling a queue *)
+  queued: INTEGER;
   a: Sockets.Address;
   err: Sockets.Error;
   n, fds0: INTEGER;
@@ -108,7 +111,17 @@ BEGIN
     & SocketTasks.Accept(l, s, peer, err)
 END Connected;
 
-(* label := "connect to 127.0.0.1 port <port>: timed out" *)
+(* s := s + t *)
+PROCEDURE Append(VAR s: ARRAY OF CHAR; t: ARRAY OF CHAR);
+  VAR i, j: LONGINT;
+BEGIN
+  i := 0; WHILE s[i] # 0X DO INC(i) END;
+  j := 0;
+  WHILE (t[j] # 0X) & (i < LEN(s) - 1) DO s[i] := t[j]; INC(i); INC(j) END;
+  s[i] := 0X
+END Append;
+
+(* label := "connect to 127.0.0.1 port <port>: " *)
 PROCEDURE ConnectLabel(port: INTEGER; VAR label: ARRAY OF CHAR);
   VAR i, j: INTEGER;
 BEGIN
@@ -117,9 +130,7 @@ BEGIN
   j := 10000; WHILE j > port DO j := j DIV 10 END;
   WHILE j > 0 DO label[i] := CHR(ORD("0") + port DIV j MOD 10); INC(i); j := j DIV 10 END;
   label[i] := 0X;
-  COPY(": timed out", buf); j := 0;
-  WHILE buf[j] # 0X DO label[i] := buf[j]; INC(i); INC(j) END;
-  label[i] := 0X
+  Append(label, ": ")
 END ConnectLabel;
 
 BEGIN
@@ -157,10 +168,13 @@ BEGIN
     "after a timeout, a new deadline and data sent in time: the Read succeeds");
 
   (* A deadline already past: what is there is still read; when nothing
-     is, it times out without waiting. *)
+     is, it times out without waiting. The byte must have arrived before
+     the Read: Linux's loopback delivers it within send, the BSDs' a
+     moment later (PLAN.md, Phase 9), so poll for it, outside Tasks. *)
   Sockets.SetDeadline(s, 1); Tasks.Sleep(20);
   buf[0] := "y"; ok := SocketTasks.Write(c, buf, 0, 1, got, err);
-  ok := ok & SocketTasks.Read(s, buf, 0, 10, got, err);
+  ok := ok & TestHelp.WaitReadable(s.fd, 5000)
+    & SocketTasks.Read(s, buf, 0, 10, got, err);
   Check.Check(ok & (got = 1) & (buf[0] = "y"),
     "past its deadline, a Read that needn't wait still reads");
   t0 := Sockets.Now();
@@ -172,7 +186,7 @@ BEGIN
   Check.Check(s.deadline = 0, "SetDeadline 0 clears it");
 
   (* A WriteAll to a peer that doesn't read *)
-  ok := TestHelp.SmallBuffers(s.fd, 4096) & TestHelp.SmallBuffers(c.fd, 4096);
+  ok := TestHelp.SmallSendBuffer(s.fd, 4096) & TestHelp.SmallReceiveBuffer(c.fd, 4096);
   Sockets.SetDeadline(s, 200);
   t0 := Sockets.Now();
   ok := ok & ~SocketTasks.WriteAll(s, buf, 0, LEN(buf), got, err);
@@ -198,26 +212,45 @@ BEGIN
   Sockets.Close(c);
   Sockets.Close(l);
 
-  (* Connecting to a listener whose queue is full: on Linux one
-     connection waits in a backlog of 0, and the next SYN is dropped, so
-     the connect waits until its limit. *)
+  (* Connecting to a listener whose queue is full. How many connections
+     a backlog of 0 queues, and what the next connect gets, differ
+     (PLAN.md, Phase 9): Linux and NetBSD queue one, OpenBSD 81
+     (kern.sominconn is 80), and then a SYN is dropped, so the connect
+     waits until its limit; FreeBSD queues two, then resets the next
+     connect at once (ECONNRESET). So connect until one doesn't. *)
   ok := Sockets.Listen("127.0.0.1", 0, 0, TRUE, ls, n, err)
     & Sockets.LocalAddress(ls[0], a, err);
-  l := ls[0];
-  ok := ok & SocketTasks.ConnectTo(a, 1000, c, err);
-  t0 := Sockets.Now();
-  ok := ok & ~SocketTasks.ConnectTo(a, 200, c2, err);
+  l := ls[0]; queued := 0;
+  LOOP
+    IF ~ok OR (queued = Fill) THEN EXIT END;
+    t0 := Sockets.Now();
+    IF ~SocketTasks.ConnectTo(a, 200, cs[queued], err) THEN EXIT END;
+    INC(queued)
+  END;
   el := Sockets.Now() - t0;
+  ok := ok & (queued >= 1) & (queued < Fill) & (cs[queued] = NIL);
   ConnectLabel(a.port, label);
-  Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.timedOut) & Near(el, 200),
-    "a connect to a full queue times out at its limit, and is closed");
-  Check.Check(err.text = label, "its text names the address");
-  t0 := Sockets.Now();
-  ok := ~SocketTasks.Connect("127.0.0.1", a.port, 200, c2, err);
-  el := Sockets.Now() - t0;
-  Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.timedOut) & Near(el, 200),
-    "Connect's limit too");
-  Sockets.Close(c); Sockets.Close(l);
+  IF ok & (err.kind = Sockets.timedOut) THEN
+    Check.Check(Near(el, 200), "a connect to a full queue times out at its limit, and is closed");
+    Append(label, "timed out");
+    Check.Check(err.text = label, "its text names the address");
+    t0 := Sockets.Now();
+    ok := ~SocketTasks.Connect("127.0.0.1", a.port, 200, c2, err);
+    el := Sockets.Now() - t0;
+    Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.timedOut) & Near(el, 200),
+      "Connect's limit too")
+  ELSE
+    Check.Check(ok & (err.kind = Sockets.system) & (err.code = Sockets.ECONNRESET)
+      & (el < 200), "a connect to a full queue is reset at once, and is closed");
+    Check.Check(StartsWith(err.text, label), "its text names the address");
+    t0 := Sockets.Now();
+    ok := ~SocketTasks.Connect("127.0.0.1", a.port, 200, c2, err);
+    el := Sockets.Now() - t0;
+    Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.system)
+      & (err.code = Sockets.ECONNRESET) & (el < 200), "Connect too")
+  END;
+  WHILE queued > 0 DO DEC(queued); Sockets.Close(cs[queued]) END;
+  Sockets.Close(l);
 
   (* The lingering close *)
   ok := Sockets.Listen("127.0.0.1", 0, 5, TRUE, ls, n, err)

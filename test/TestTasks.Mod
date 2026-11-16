@@ -99,7 +99,7 @@ BEGIN
   WHILE i < Clients DO
     NEW(es[i]);
     IF SocketTasks.Accept(t.l, es[i].s, peer, err) THEN
-      IF ~TestHelp.SmallBuffers(es[i].s.fd, Buffers) THEN INC(echoFailures) END;
+      IF ~TestHelp.SmallSendBuffer(es[i].s.fd, Buffers) THEN INC(echoFailures) END;
       Tasks.Start(es[i], Stack); INC(echoes); INC(i)
     ELSE
       INC(echoFailures); Tasks.Sleep(10)
@@ -132,7 +132,7 @@ BEGIN
   IF ~SocketTasks.Connect(t.host, t.port, 0, s, err) THEN
     COPY(err.text, t.why); RETURN
   END;
-  IF ~TestHelp.SmallBuffers(s.fd, Buffers) THEN
+  IF ~TestHelp.SmallSendBuffer(s.fd, Buffers) THEN
     t.why := "SO_SNDBUF"; Sockets.Close(s); RETURN
   END;
   NEW(w); w.s := s; Tasks.Start(w, Stack);
@@ -165,6 +165,10 @@ BEGIN
      until the program ends; WakeDescriptor makes it now, so it is
      counted in fds0. *)
   IF Tasks.WakeDescriptor() < 0 THEN Check.Check(FALSE, "Tasks has its self-pipe") END;
+  (* The resolver may keep descriptors after a lookup that asks a name
+     server: NetBSD's keeps a kqueue (PLAN.md, Phase 9). Look one up
+     now, so that they are counted in fds0. *)
+  ok := Sockets.Resolve("nonexistent.invalid", 80, addrs, n, err);
   fds0 := TestHelp.OpenFds();
 
   (* Many connections at once. Odd clients connect to localhost, which

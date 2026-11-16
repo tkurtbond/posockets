@@ -101,7 +101,7 @@ BEGIN
   IF ~SocketTasks.Connect(t.host, SHORT(port), 10000, s, err) THEN
     COPY(err.text, t.why); RETURN
   END;
-  IF ~TestHelp.SmallBuffers(s.fd, Buffers) THEN
+  IF ~TestHelp.SmallSendBuffer(s.fd, Buffers) THEN
     t.why := "SO_SNDBUF"; Sockets.Close(s); RETURN
   END;
   NEW(w); w.s := s; Tasks.Start(w, Stack);

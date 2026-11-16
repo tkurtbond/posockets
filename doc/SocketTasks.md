@@ -68,7 +68,7 @@ PROCEDURE ConnectUnix*(path: ARRAY OF CHAR; ms: LONGINT;
     VAR s: Sockets.Socket; VAR err: Sockets.Error): BOOLEAN;
 ```
 
-A Unix-domain connection to the listener at path, as a non-blocking s, in at most ms milliseconds (0: no limit). On Linux a listener whose queue is full refuses at once with EAGAIN, and its socket can't be waited on (Sockets.ConnectUnix), so this sleeps (Tasks.Sleep), from 1 ms doubling to 64 ms, and tries again, until there is room or ms has passed: "connect to <path>: timed out". Any other failure, as ECONNREFUSED for a stale socket file, comes back at once. Halts as Sockets.ConnectUnix for the path, and (Sockets.AssertArgument) for a negative ms.
+A Unix-domain connection to the listener at path, as a non-blocking s, in at most ms milliseconds (0: no limit). On Linux a listener whose queue is full refuses at once with EAGAIN, and its socket can't be waited on (Sockets.ConnectUnix), so this sleeps (Tasks.Sleep), from 1 ms doubling to 64 ms, and tries again, until there is room or ms has passed: "connect to <path>: timed out". Any other failure comes back at once: ECONNREFUSED for a stale socket file, and on FreeBSD and NetBSD for a full queue too, which can't be told from it, so there it isn't tried again. Halts as Sockets.ConnectUnix for the path, and (Sockets.AssertArgument) for a negative ms.
 
 #### Read
 

@@ -57,7 +57,7 @@ PROCEDURE Exchange(s: Sockets.Socket; expect: Run.Bytes; what: ARRAY OF CHAR);
   VAR buf: ARRAY 5000 OF CHAR; n, got, size, i, k: LONGINT; err: Sockets.Error;
     same: BOOLEAN; label: ARRAY 128 OF CHAR;
 BEGIN
-  same := TestHelp.SmallBuffers(s.fd, Buffers);
+  same := TestHelp.SmallSendBuffer(s.fd, Buffers);
   size := 0; IF expect # NIL THEN size := LEN(expect^) - 1 END;
   got := 0;
   Sockets.SetDeadline(s, 10000);

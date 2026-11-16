@@ -66,6 +66,10 @@ BEGIN
 END Connection;
 
 BEGIN
+  (* The resolver may keep descriptors after a lookup that asks a name
+     server: NetBSD's keeps a kqueue (PLAN.md, Phase 9). Look one up
+     now, so that they are counted in fds0. *)
+  ok := Sockets.Resolve("nonexistent.invalid", 80, addrs, n, err);
   fds0 := TestHelp.OpenFds();
 
   (* Refused: a port listened on, then closed *)

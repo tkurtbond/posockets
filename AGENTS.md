@@ -32,7 +32,8 @@ behaviour of poc that applies here unchanged:
 
 As of 2026-11-15, Phases 1 (the skeleton), 2 (errors and addresses),
 3 (blocking TCP), 4 (`SocketTasks`), 5 (deadlines), 6 (Unix-domain
-sockets) and 8 (examples and documentation) are done: the
+sockets), 8 (examples and documentation) and 9 (the BSD port) are
+done: the
 build, the test and valgrind runners, and `Sockets` with its C part:
 `Error`, `Address`, `Resolve`, `Pair`, `Close`, `LocalAddress`,
 `PeerAddress`, `Listen`, `Accept`, `Connect`, `ConnectTo`,
@@ -44,19 +45,20 @@ build, the test and valgrind runners, and `Sockets` with its C part:
 `Write`, `WriteAll`, `LingeringClose`, waiting through `Tasks` until
 the socket's deadline; the examples `EchoServer`, `EchoClient`,
 `Netcat`, `Forward` and `FileServer`, each tested from outside; and the
-reference in `doc/`. Phase 7, socket options, waits for a user to ask
-for one; next is Phase 9, the BSD port.
+reference in `doc/`; tested on Linux, FreeBSD, OpenBSD and NetBSD.
+Phase 7, socket options, waits for a user to ask for one.
 
-**Phase 5 needs a poc newer than 0.12.0** (`Tasks.AwaitReadableFor`,
-Peaseblossom commit 73109d2, in no release yet). Until the next
-release, a poc built from the checkout's HEAD (`git archive`, so the
-user's uncommitted Peaseblossom tree is never touched) is installed in
+**Phase 5 needs poc 0.13.0 or later** (`Tasks.AwaitReadableFor`). The
+BSD hosts have 0.13.0; this machine's `/usr/bin/poc` was still 0.12.0
+on 2026-11-15, which fails on `SocketTasks.Mod`, so a poc built from
+the Peaseblossom checkout (`git archive`, so the user's uncommitted
+Peaseblossom tree is never touched) is installed in
 `/usr/local/sw/tmp/claude-posockets-phase5/prefix`; build and test with
 `make test POC=/usr/local/sw/tmp/claude-posockets-phase5/prefix/bin/poc`
-(and `make valgrind POC=...`). `/usr/bin/poc` fails on
-`SocketTasks.Mod`. The copy in `~/.local/lib/poc`, which polibtls uses,
-is Phase 4's (commit 72e218a), installed with 0.12.0; don't reinstall
-from this tree until poc is released, or polibtls on 0.12.0 can't use it.
+(and `make valgrind POC=...`) until 0.13.0 is installed here. The copy
+in `~/.local/lib/poc`, which polibtls uses, is Phase 4's (commit
+72e218a), installed with 0.12.0; reinstall from this tree only when the
+user says, once polibtls is on 0.13.0.
 
 ## Reference material
 
@@ -119,11 +121,25 @@ also accepting the memory glibc's loader keeps for the NSS modules
 `--track-fds=yes`; `test/vg-fds.sh` fails a test that leaves a
 descriptor open (more open at exit than it inherited, less the two of
 Tasks' self-pipe, which it allows). A test may also check its own count
-through `/proc/self/fd`; one using tasks calls `Tasks.WakeDescriptor`
+with `TestHelp.OpenFds` (`fcntl(F_GETFD)` on each descriptor below the
+limit; the BSDs have no usable `/proc/self/fd`); one using tasks calls `Tasks.WakeDescriptor`
 first, so the self-pipe is already counted. Tests that run tasks are
 listed in `TASKTESTS` as well as `TESTS`: memcheck can't follow poc's
 coroutines, so `make valgrind` runs those under `--tool=none` for the
 descriptor check only.
+
+## Testing on the BSD hosts
+
+Phase 9 ran `gmake test` on FreeBSD 15.1 amd64 (alerik), OpenBSD 7.9
+i386 (cymoril) and amd64 (jherek), and NetBSD 11.0 amd64 (artos) and
+i386 (yishana), each with poc 0.13.0; rackhir (FreeBSD) builds
+packages, so ask before using it. Log in by `ssh <host>`, put
+`/usr/pkg/bin:/usr/local/bin` on `PATH`, and use `gmake`. Copy the
+working tree there (`tar` less `build/` and `.git`) into a directory
+under `~/tmp` and remove it when done; never work in a checkout on the
+host. There is no valgrind there. Judge a run by make's exit status
+and count `assertion failed` lines as well as `FAIL`: a test that
+halts prints no `FAIL` (`TestUnix` hid a halt this way).
 
 ## Layout
 
@@ -137,7 +153,8 @@ descriptor check only.
 - `test/`: `Check.Mod`, the tests and halt tests, `poc-gc.supp`,
   `vg-reachable.sh`, `vg-fds.sh`. `TestHelp.Mod`/`.c`: what tests need
   that the library doesn't offer (a `poll` with a timeout, `SO_LINGER`
-  0, small socket buffers, the descriptor limit and count). Helper programs a test runs as a
+  0, a small send or receive buffer, `sun_path`'s size, the descriptor
+  limit and count). Helper programs a test runs as a
   child (`BlockingPeer`, `TooManyFiles`) are listed in `HELPERS` and
   built into `build/` before the tests. `Run.Mod`: starts a program
   in the background, its output in `build/`, reads the port a server
@@ -253,8 +270,9 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   `Tasks.WakeDescriptor()` (in poc 0.12.0), and never closed.
 - **Loopback's socket buffers are large enough that 300 KB never
   blocked**: `send` never returned `EAGAIN`. Asking for 4096-byte
-  `SO_SNDBUF`/`SO_RCVBUF` (`TestHelp.SmallBuffers`) gave hundreds of
-  waits (`strace`).
+  `SO_SNDBUF`/`SO_RCVBUF` gave hundreds of waits (`strace`); so does
+  `SO_SNDBUF` alone (`TestHelp.SmallSendBuffer`), which is all the
+  tests now shrink, since a small `SO_RCVBUF` stalls the BSDs.
 - **A record field may refer to a type declared later only as `POINTER
   TO` it** (`target: POINTER TO Address`); a named pointer type
   declared later is rejected.
@@ -271,15 +289,16 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   with backlog 0, one connection queues and later SYNs are dropped
   (`tcp_syncookies` = 1, `tcp_abort_on_overflow` = 0), so the connect
   neither completes nor is refused. `TestDeadline` times out a connect
-  this way. Not known on the BSDs.
+  this way. NetBSD and OpenBSD do the same (OpenBSD after 81);
+  FreeBSD resets the connect at once (below).
 - **A poc library is tied to the `Tasks` it was built against**: a
   program built with the checkout's poc refused the copy in
   `~/.local/lib/poc` built by 0.12.0, saying to rebuild posockets. A
   throwaway program built with that poc takes this tree from source
   instead: `-clear-library-path -library-path <prefix>/lib/poc
   -import-path ~/Repos/Oberon/posockets/src`.
-- **Unix-domain sockets on Linux** (Phase 6): `sun_path` is 108
-  bytes, and a 107-byte path binds. With backlog 0 one connection
+- **Unix-domain sockets on Linux** (Phase 6; the BSDs differ, below):
+  `sun_path` is 108 bytes, and a 107-byte path binds. With backlog 0 one connection
   queues; a second non-blocking connect fails with `EAGAIN`, nothing in
   progress, and `poll(POLLOUT)` returns at once (`POLLOUT|POLLHUP`), so
   waiting on it is useless: `SocketTasks.ConnectUnix` sleeps and
@@ -296,6 +315,53 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
 - **poc's `-show-interface` prints a module's declarations without
   their comments**, so `doc/` is made from the source by `mkref.py`
   instead.
+
+### On the BSDs (Phase 9)
+
+Confirmed on 2026-11-15 with poc 0.13.0 on FreeBSD 15.1, OpenBSD 7.9
+and NetBSD 11.0 (alerik, cymoril, jherek, artos, yishana), by
+throwaway C programs or the tests:
+
+- **On i386 under `-OC`, `LEN` doesn't fit `SYSTEM.ADDRESS`**: `LEN`
+  is a 64-bit `LONGINT`, an `ADDRESS` 32 bits, and passing one to the
+  other fails ("LONGINT to SYSTEM.ADDRESS"). `SYSTEM.INT64` takes it,
+  as does `SYSTEM.VAL(SYSTEM.ADDRESS, LEN(s))`; `Sockets` passes lengths
+  as `SYSTEM.INT64`.
+- **A small `SO_RCVBUF` on a connected TCP socket stalls the BSDs**:
+  with 4096 bytes asked for on both ends, large transfers in
+  `TestEcho`, `TestNetcat`, `TestForward` and `TestFileServer` stopped
+  until their 20 s deadlines; with only `SO_SNDBUF` small, they pass.
+  Linux copes with either.
+- **The BSDs' loopback delivers a moment after `send`**: a read on the
+  other end straight after can find nothing; Linux's has it there.
+- **The loopback interface is `lo0`**, so a scope id is `%lo0`.
+- **FreeBSD and OpenBSD have no `/proc/self/fd`**, and NetBSD's gave a
+  wrong count; `fcntl(fd, F_GETFD)` works on all four.
+- **NetBSD's resolver keeps a `kqueue`** after looking up
+  `nonexistent.invalid` (`ktrace`): a descriptor that is never closed.
+- **A full TCP listen queue**: FreeBSD queues two with backlog 0 or 1
+  and resets the next connect at once (`ECONNRESET` from `connect`, and
+  as `SO_ERROR`); OpenBSD queues 81 with backlog 0 (`kern.sominconn`
+  80) and then hangs the next, as NetBSD does after one.
+- **A full Unix-domain queue**: FreeBSD and NetBSD queue backlog + 1
+  and refuse the next at once with `ECONNREFUSED`; OpenBSD queued all
+  of 200 tried with backlog 0.
+- **`sun_path` is 104 bytes**, so the longest path is 103.
+- **`accept4(l, ..., SOCK_CLOEXEC)` from a non-blocking listener gives
+  a blocking, close-on-exec socket**, as on Linux.
+- **`shutdown` on a listener**: FreeBSD returns `ENOTCONN` but shuts
+  it, and `accept` then gives `ECONNABORTED`; OpenBSD returns 0 and the
+  same; NetBSD returns 0, `poll` says readable, and `accept` gives
+  `EAGAIN` (Linux: 0, `POLLHUP`, `EINVAL`). `Sockets.Shutdown` halts on
+  a listener anyway.
+- **`MSG_NOSIGNAL`, `accept4`, `SOCK_CLOEXEC`, `SOCK_NONBLOCK`** are in
+  all three, with no feature macro; `TestErrors`' write to a reset peer
+  gives `EPIPE` or `ECONNRESET`, never `SIGPIPE`.
+- **FreeBSD's delayed ACK (`net.inet.tcp.delacktime` 40) makes a 4096-byte
+  send buffer slow**: 100,000 bytes took about 3 s over loopback, longer
+  than `FileServer`'s 2 s linger. And on FreeBSD a plain `Close` with
+  unread data didn't lose the answer `TestFileServer` waits for, as it
+  does on Linux.
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 

@@ -4,9 +4,10 @@ MODULE TestUnix; (* Unix-domain sockets: Pair, ListenUnix, ConnectUnix *)
    a blocking connection to it and its addresses; binding over an
    existing file, a stale socket file, no file; many clients at once
    through SocketTasks, each echoing more than a socket buffer holds;
-   a full listen queue (backlog 0), where a non-blocking connect gives
-   EAGAIN and SocketTasks.ConnectUnix retries until there is room or its
-   limit passes; Adopt of a Unix listener; the longest path Linux takes.
+   a full listen queue (backlog 0), where on Linux a non-blocking
+   connect gives EAGAIN and SocketTasks.ConnectUnix retries until there
+   is room or its limit passes, and on FreeBSD and NetBSD it is refused;
+   Adopt of a Unix listener; the longest path the system takes.
    Every socket file is under ../build and removed again. A watchdog
    task ends the program if anything waits too long. *)
 
@@ -19,6 +20,7 @@ CONST
   Patience = 60000;        (* ms the watchdog allows the whole test *)
   Buffers = 4096;          (* each connection's socket buffers, asked for *)
   Limit = 200;             (* ms a connect to a full queue may take *)
+  Fill = 150;              (* connections tried at most, to fill a queue *)
 
 TYPE
   Echo = POINTER TO RECORD (Tasks.TaskDesc)
@@ -49,6 +51,8 @@ VAR
   late: LateAccept;
   watchdog: Watchdog;
   a, b, l, s, c, c2, q: Sockets.Socket;
+  qs: ARRAY Fill + 1 OF Sockets.Socket;   (* the connections filling q *)
+  queued, max: INTEGER;
   addr, peer: Sockets.Address;
   err: Sockets.Error;
   ok: BOOLEAN;
@@ -121,7 +125,7 @@ BEGIN
     IF SocketTasks.Accept(t.l, es[i].s, peer, err) THEN
       IF (peer.family # Sockets.unix) OR (peer.host # "")
         OR (es[i].s.family # Sockets.unix)
-        OR ~TestHelp.SmallBuffers(es[i].s.fd, Buffers) THEN
+        OR ~TestHelp.SmallSendBuffer(es[i].s.fd, Buffers) THEN
         INC(echoFailures)
       END;
       Tasks.Start(es[i], Stack); INC(echoes); INC(i)
@@ -159,7 +163,7 @@ BEGIN
   IF ~s.nonBlocking OR (s.family # Sockets.unix) THEN
     t.why := "not a non-blocking Unix-domain socket"; Sockets.Close(s); RETURN
   END;
-  IF ~TestHelp.SmallBuffers(s.fd, Buffers) THEN
+  IF ~TestHelp.SmallSendBuffer(s.fd, Buffers) THEN
     t.why := "SO_SNDBUF"; Sockets.Close(s); RETURN
   END;
   NEW(w); w.s := s; Tasks.Start(w, Stack);
@@ -276,39 +280,67 @@ BEGIN
     "10 connections accepted and echoed, with no error");
   Sockets.Close(l); Remove(path);
 
-  (* A full queue: backlog 0 queues one connection, and no more. *)
-  ok := Sockets.ListenUnix(queuePath, 0, FALSE, q, err)
-    & Sockets.ConnectUnix(queuePath, TRUE, c, err);
-  Check.Check(ok, "backlog 0 queues one connection");
-  ok := ~Sockets.ConnectUnix(queuePath, TRUE, c2, err);
-  Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.system) & (err.code = Sockets.EAGAIN),
-    "a non-blocking ConnectUnix to a full queue is EAGAIN, with no socket");
-  t0 := Sockets.Now();
-  ok := ~SocketTasks.ConnectUnix(queuePath, Limit, c2, err);
-  t := Sockets.Now() - t0;
-  label := "connect to "; Append(label, queuePath); Append(label, ": timed out");
-  Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.timedOut) & Equal(err.text, label),
-    "SocketTasks.ConnectUnix to a full queue times out, saying where");
-  Check.Check((t >= Limit) & (t < Limit + 100), "after its limit");
-  IF ~((t >= Limit) & (t < Limit + 100)) THEN
-    Out.String("# took "); Out.Int(t, 0); Out.String(" ms"); Out.Ln
+  (* A full queue. How many connections a backlog of 0 queues, and what
+     the next connect gets, differ (PLAN.md, Phase 9): Linux queues one,
+     then a non-blocking connect is EAGAIN, and SocketTasks.ConnectUnix
+     sleeps and retries; FreeBSD and NetBSD queue one, then refuse it
+     (ECONNREFUSED), as for a stale socket file, so ConnectUnix fails at
+     once; OpenBSD queued every one tried. So connect until one doesn't. *)
+  ok := Sockets.ListenUnix(queuePath, 0, FALSE, q, err);
+  queued := 0;
+  WHILE ok & (queued < Fill) & Sockets.ConnectUnix(queuePath, TRUE, qs[queued], err) DO
+    INC(queued)
   END;
-  NEW(late); late.l := q; Tasks.Start(late, Stack);
-  t0 := Sockets.Now();
-  ok := SocketTasks.ConnectUnix(queuePath, 5000, c2, err);
-  t := Sockets.Now() - t0;
-  Tasks.Join(late);
-  Check.Check(ok & late.ok & (t >= 40) & (t < 1000),
-    "it connects once another task's Accept makes room");
-  Sockets.Close(c2); Sockets.Close(late.s); Sockets.Close(c); Sockets.Close(q);
+  Check.Check(ok & (queued >= 1), "backlog 0 queues a connection");
+  IF queued = Fill THEN
+    Out.String("# skipped: "); Out.Int(Fill, 0);
+    Out.String(" connections queued with backlog 0, and no limit reached"); Out.Ln
+  ELSIF err.code = Sockets.EAGAIN THEN
+    Check.Check((qs[queued] = NIL) & (err.kind = Sockets.system),
+      "a non-blocking ConnectUnix to a full queue is EAGAIN, with no socket");
+    t0 := Sockets.Now();
+    ok := ~SocketTasks.ConnectUnix(queuePath, Limit, c2, err);
+    t := Sockets.Now() - t0;
+    label := "connect to "; Append(label, queuePath); Append(label, ": timed out");
+    Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.timedOut) & Equal(err.text, label),
+      "SocketTasks.ConnectUnix to a full queue times out, saying where");
+    Check.Check((t >= Limit) & (t < Limit + 100), "after its limit");
+    IF ~((t >= Limit) & (t < Limit + 100)) THEN
+      Out.String("# took "); Out.Int(t, 0); Out.String(" ms"); Out.Ln
+    END;
+    NEW(late); late.l := q; Tasks.Start(late, Stack);
+    t0 := Sockets.Now();
+    ok := SocketTasks.ConnectUnix(queuePath, 5000, c2, err);
+    t := Sockets.Now() - t0;
+    Tasks.Join(late);
+    Check.Check(ok & late.ok & (t >= 40) & (t < 1000),
+      "it connects once another task's Accept makes room");
+    Sockets.Close(c2); Sockets.Close(late.s)
+  ELSE
+    Check.Check((qs[queued] = NIL) & (err.kind = Sockets.system)
+      & (err.code = Sockets.ECONNREFUSED),
+      "a non-blocking ConnectUnix to a full queue is refused, with no socket");
+    t0 := Sockets.Now();
+    ok := ~SocketTasks.ConnectUnix(queuePath, Limit, c2, err);
+    t := Sockets.Now() - t0;
+    label := "connect to "; Append(label, queuePath); Append(label, ": ");
+    Check.Check(ok & (c2 = NIL) & (err.kind = Sockets.system)
+      & (err.code = Sockets.ECONNREFUSED) & StartsWith(err.text, label) & (t < Limit),
+      "SocketTasks.ConnectUnix to a full queue is refused at once, saying where")
+  END;
+  i := 0; WHILE i < queued DO Sockets.Close(qs[i]); INC(i) END;
+  Sockets.Close(q);
   Remove(queuePath);
 
-  (* The longest path sun_path holds on Linux, 107 bytes. *)
+  (* The longest path sun_path holds: 107 bytes on Linux, 103 on the
+     BSDs. *)
+  max := TestHelp.UnixPathMax() - 1;
   longPath := "../build/";
-  i := 9; WHILE i < 107 DO longPath[i] := "x"; INC(i) END; longPath[107] := 0X;
+  i := 9; WHILE i < max DO longPath[i] := "x"; INC(i) END; longPath[max] := 0X;
   Remove(longPath);
   ok := Sockets.ListenUnix(longPath, 1, FALSE, l, err) & Sockets.LocalAddress(l, addr, err);
-  Check.Check(ok & Equal(addr.host, longPath), "a path of 107 bytes binds");
+  Check.Check(ok & Equal(addr.host, longPath), "the longest path sun_path holds binds");
+  IF max # 107 THEN Out.String("# "); Out.Int(max, 0); Out.String(" bytes"); Out.Ln END;
   Sockets.Close(l); Remove(longPath);
 
   Check.Check(TestHelp.OpenFds() = fds0, "every socket is closed again");

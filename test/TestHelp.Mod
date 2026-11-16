@@ -7,12 +7,13 @@ IMPORT SYSTEM;
 PROCEDURE ["C", "TestHelp.-wait"] CWait(fd: SYSTEM.INT64; write, ms: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-dup"] CDup(fd: SYSTEM.INT64): SYSTEM.INT64;
 PROCEDURE ["C", "TestHelp.-reset-on-close"] CResetOnClose(fd: SYSTEM.INT64): SYSTEM.INT32;
-PROCEDURE ["C", "TestHelp.-small-buffers"] CSmallBuffers(fd: SYSTEM.INT64; bytes: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "TestHelp.-small-buffer"] CSmallBuffer(fd: SYSTEM.INT64; bytes, receive: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-file-limit"] CFileLimit(): SYSTEM.INT64;
 PROCEDURE ["C", "TestHelp.-set-file-limit"] CSetFileLimit(n: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-open-fds"] COpenFds(): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-open-null"] COpenNull(): SYSTEM.INT64;
 PROCEDURE ["C", "TestHelp.-close"] CClose(fd: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "TestHelp.-unix-path-max"] CUnixPathMax(): SYSTEM.INT32;
 
 (* Whether fd becomes readable within ms milliseconds: a listener has a
    connection queued, so Accept won't wait. *)
@@ -40,13 +41,29 @@ BEGIN
   RETURN CResetOnClose(fd) = 0
 END ResetOnClose;
 
-(* Small send and receive buffers on fd (SO_SNDBUF, SO_RCVBUF), so
-   that a test's reads and writes wait: with the loopback's own, 300,000
-   bytes on each of 20 connections never did (PLAN.md, "Testing"). *)
-PROCEDURE SmallBuffers*(fd: LONGINT; bytes: INTEGER): BOOLEAN;
+(* A small send buffer on fd (SO_SNDBUF), so that a test's writes
+   wait: with the loopback's own, 300,000 bytes on each of 20
+   connections never did (PLAN.md, "Testing"). Only the send buffer:
+   shrinking the receive buffer of a connected socket stalls transfers
+   on FreeBSD, OpenBSD and NetBSD (PLAN.md, Phase 9). *)
+PROCEDURE SmallSendBuffer*(fd: LONGINT; bytes: INTEGER): BOOLEAN;
 BEGIN
-  RETURN CSmallBuffers(fd, bytes) = 0
-END SmallBuffers;
+  RETURN CSmallBuffer(fd, bytes, 0) = 0
+END SmallSendBuffer;
+
+(* A small receive buffer (SO_RCVBUF) on fd, for a peer that never
+   reads, so that what is sent to it soon fills it. *)
+PROCEDURE SmallReceiveBuffer*(fd: LONGINT; bytes: INTEGER): BOOLEAN;
+BEGIN
+  RETURN CSmallBuffer(fd, bytes, 1) = 0
+END SmallReceiveBuffer;
+
+(* sun_path's size, its terminator included: the longest Unix-domain
+   path is one less (107 bytes on Linux, 103 on the BSDs). *)
+PROCEDURE UnixPathMax*(): INTEGER;
+BEGIN
+  RETURN CUnixPathMax()
+END UnixPathMax;
 
 (* RLIMIT_NOFILE's soft limit, or -1 *)
 PROCEDURE FileLimit*(): LONGINT;
@@ -59,7 +76,7 @@ BEGIN
   RETURN CSetFileLimit(n) = 0
 END SetFileLimit;
 
-(* Descriptors open now (/proc/self/fd), or -1 *)
+(* Descriptors open now, counted with fcntl *)
 PROCEDURE OpenFds*(): INTEGER;
 BEGIN
   RETURN COpenFds()
