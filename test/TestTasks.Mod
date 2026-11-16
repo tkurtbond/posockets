@@ -129,7 +129,7 @@ PROCEDURE (t: Client) Run*;
     buf: ARRAY 5000 OF CHAR; n, got, i: LONGINT;
 BEGIN
   t.ok := FALSE;
-  IF ~SocketTasks.Connect(t.host, t.port, s, err) THEN
+  IF ~SocketTasks.Connect(t.host, t.port, 0, s, err) THEN
     COPY(err.text, t.why); RETURN
   END;
   IF ~TestHelp.SmallBuffers(s.fd, Buffers) THEN
@@ -194,7 +194,7 @@ BEGIN
     "20 connections accepted and echoed, with no error");
 
   (* A wait is counted in waiters; a peer's write ends it. *)
-  ok := SocketTasks.ConnectTo(a, c, err) & SocketTasks.Accept(l, s, a, err);
+  ok := SocketTasks.ConnectTo(a, 0, c, err) & SocketTasks.Accept(l, s, a, err);
   Check.Check(ok & c.nonBlocking & s.nonBlocking,
     "ConnectTo and Accept give non-blocking sockets");
   NEW(reader); reader.s := s; Tasks.Start(reader, Stack);
@@ -221,7 +221,7 @@ BEGIN
      until now, so another program taking it at once is unlikely. *)
   Sockets.Close(l);
   ok := Sockets.Resolve("127.0.0.1", port, addrs, n, err);
-  ok := ok & ~SocketTasks.ConnectTo(addrs[0], c, err);
+  ok := ok & ~SocketTasks.ConnectTo(addrs[0], 0, c, err);
   Check.Check(ok & (c = NIL) & (err.kind = Sockets.system)
     & (err.code = Sockets.ECONNREFUSED), "ConnectTo where nothing listens is ECONNREFUSED");
   label := "connect to 127.0.0.1 port "; i := 0;
@@ -230,7 +230,7 @@ BEGIN
   WHILE j > 0 DO label[i] := CHR(ORD("0") + n DIV j MOD 10); INC(i); j := j DIV 10 END;
   label[i] := ":"; label[i + 1] := 0X;
   Check.Check(StartsWith(err.text, label), "its text says where it was connecting");
-  ok := SocketTasks.Connect("nonexistent.invalid", 1, c, err);
+  ok := SocketTasks.Connect("nonexistent.invalid", 1, 0, c, err);
   Check.Check(~ok & (c = NIL) & (err.kind = Sockets.name)
     & StartsWith(err.text, "resolve nonexistent.invalid port 1: "),
     "Connect to a name that doesn't resolve is a name error");

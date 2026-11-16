@@ -38,6 +38,7 @@
 #include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -805,4 +806,15 @@ int32_t ignore_sigpipe(void)
 	sa.sa_handler = SIG_IGN;
 	sigemptyset(&sa.sa_mask);
 	return sigaction(SIGPIPE, &sa, NULL) == 0 ? 0 : errno;
+}
+
+/* The monotonic clock in milliseconds, for deadlines: it never goes back
+   when the time of day is set. */
+int64_t now(void) NAME("now");
+int64_t now(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }

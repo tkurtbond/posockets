@@ -20,20 +20,24 @@ It is planned to offer:
 - errors from the network or the system returned as a result, never a
   halt.
 
-**Status: early.** Phases 1 to 4 of [PLAN.md](PLAN.md) are done:
+**Status: early.** Phases 1 to 5 of [PLAN.md](PLAN.md) are done:
 the build and tests, errors, addresses as text, resolving names, socket
 pairs, and blocking TCP over IPv4 and IPv6 (`Listen`, `Accept`,
 `Connect`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Close`), with
 non-blocking sockets, and `SocketTasks`, which waits through poc's
-`Tasks` so one thread serves many connections. Deadlines come next. PLAN.md has the design and the
+`Tasks` so one thread serves many connections, with deadlines on its
+waits, time limits on connecting, and a lingering close. Unix-domain
+sockets come next. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 ## Requirements
 
-- poc 0.12.0 or later, on Linux. The BSDs that poc supports are to
+- A poc newer than 0.12.0, on Linux: the deadlines need
+  `Tasks.AwaitReadableFor`, which is in Peaseblossom's source but in
+  no poc release yet, so for now build poc from that source and pass
+  it to make (`make test POC=/path/to/poc`). poc 0.12.0 builds the
+  Phase 4 version (commit 72e218a). The BSDs that poc supports are to
   follow (PLAN.md, Phase 9).
-- Deadlines (Phase 5) need `Tasks.AwaitReadableFor`, which is in
-  Peaseblossom's source but in no poc release yet.
 - valgrind, for `make valgrind`.
 
 The library links nothing beyond the C library, so a program using it

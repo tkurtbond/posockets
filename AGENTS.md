@@ -31,15 +31,27 @@ behaviour of poc that applies here unchanged:
 ## Status
 
 As of 2026-11-15, Phases 1 (the skeleton), 2 (errors and addresses),
-3 (blocking TCP) and 4 (`SocketTasks`) are done: the build, the test and valgrind
-runners, and `Sockets` with its C part: `Error`, `Address`, `Resolve`,
-`Pair`, `Close`, `LocalAddress`, `PeerAddress`, `Listen`, `Accept`,
-`Connect`, `ConnectTo`, `FinishConnect`, `Read`, `Write`, `WriteAll`,
-`Shutdown`, `SetNonBlocking`, `Adopt`, `IgnoreBrokenPipe`,
-`BeginWait`/`EndWait`; and `SocketTasks`: `Accept`, `Connect`,
-`ConnectTo`, `Read`, `Write`, `WriteAll`, waiting through `Tasks`. Next
-is Phase 5, deadlines, which takes the lingering close moved from
-Phase 4.
+3 (blocking TCP), 4 (`SocketTasks`) and 5 (deadlines) are done: the
+build, the test and valgrind runners, and `Sockets` with its C part:
+`Error`, `Address`, `Resolve`, `Pair`, `Close`, `LocalAddress`,
+`PeerAddress`, `Listen`, `Accept`, `Connect`, `ConnectTo`,
+`FinishConnect`, `Read`, `Write`, `WriteAll`, `Shutdown`,
+`SetNonBlocking`, `Adopt`, `IgnoreBrokenPipe`, `BeginWait`/`EndWait`,
+`Now`, `SetDeadline`, `TimeLeft`, `TimedOut`; and `SocketTasks`:
+`Accept`, `Connect`, `ConnectTo` (both with a time limit), `Read`,
+`Write`, `WriteAll`, `LingeringClose`, waiting through `Tasks` until
+the socket's deadline. Next is Phase 6, Unix-domain sockets.
+
+**Phase 5 needs a poc newer than 0.12.0** (`Tasks.AwaitReadableFor`,
+Peaseblossom commit 73109d2, in no release yet). Until the next
+release, a poc built from the checkout's HEAD (`git archive`, so the
+user's uncommitted Peaseblossom tree is never touched) is installed in
+`/usr/local/sw/tmp/claude-posockets-phase5/prefix`; build and test with
+`make test POC=/usr/local/sw/tmp/claude-posockets-phase5/prefix/bin/poc`
+(and `make valgrind POC=...`). `/usr/bin/poc` fails on
+`SocketTasks.Mod`. The copy in `~/.local/lib/poc`, which polibtls uses,
+is Phase 4's (commit 72e218a), installed with 0.12.0; don't reinstall
+from this tree until poc is released, or polibtls on 0.12.0 can't use it.
 
 ## Reference material
 
@@ -153,7 +165,8 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   descriptor is ready, however long. A deadline needs another task to
   make it ready (PLAN.md, "Deadlines"). True of poc 0.12.0; the
   Peaseblossom checkout (commit 73109d2, 2026-11-15) adds
-  `AwaitReadableFor`/`AwaitWritableFor`, not yet in a release.
+  `AwaitReadableFor`/`AwaitWritableFor`, not yet in a release, which
+  Phase 5 uses.
 
 - **valgrind's `--track-fds=yes` reports `FILE DESCRIPTORS: <n> open
   (<m> inherited) at exit.`** (valgrind 3.27.1), not `(3 std)` as older
@@ -228,6 +241,22 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
   `AwaitReadable`** on the same TCP socket, and the read then gives end
   of stream; two tasks, one reading and one writing, wait on one socket
   together (`TestTasks`).
+- **`Tasks.AwaitReadableFor`/`AwaitWritableFor` work on sockets**
+  (the checkout's poc, Phase 5): on a Unix-domain pair and on TCP over
+  `127.0.0.1`, `TRUE` as soon as data comes, `FALSE` after the limit
+  (100 ms gave 100-101 ms), and with 0 ms a single look; an untimed
+  wait still works after a timeout.
+- **A loopback connect past a full listen queue hangs on Linux**:
+  with backlog 0, one connection queues and later SYNs are dropped
+  (`tcp_syncookies` = 1, `tcp_abort_on_overflow` = 0), so the connect
+  neither completes nor is refused. `TestDeadline` times out a connect
+  this way. Not known on the BSDs.
+- **A poc library is tied to the `Tasks` it was built against**: a
+  program built with the checkout's poc refused the copy in
+  `~/.local/lib/poc` built by 0.12.0, saying to rebuild posockets. A
+  throwaway program built with that poc takes this tree from source
+  instead: `-clear-library-path -library-path <prefix>/lib/poc
+  -import-path ~/Repos/Oberon/posockets/src`.
 
 ### Carried from polibfyaml, pofltk and polibtls, not yet re-checked here
 

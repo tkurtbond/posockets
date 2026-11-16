@@ -22,7 +22,8 @@ MODULE Sockets; (* TCP and Unix-domain sockets for poc *)
    LocalAddress and PeerAddress. Phase 3: Listen, Accept, Connect,
    ConnectTo, FinishConnect, Read, Write, WriteAll, Shutdown,
    SetNonBlocking, Adopt and IgnoreBrokenPipe, for TCP. Phase 4:
-   BeginWait and EndWait, for SocketTasks. *)
+   BeginWait and EndWait, for SocketTasks. Phase 5: SetDeadline, and
+   Now, and TimeLeft and TimedOut for SocketTasks. *)
 
 IMPORT SYSTEM;
 
@@ -148,6 +149,7 @@ PROCEDURE ["C", "Sockets.-set-nonblocking"] CSetNonBlocking(fd: SYSTEM.INT64;
 PROCEDURE ["C", "Sockets.-adopt"] CAdopt(fd: SYSTEM.INT64;
   VAR family, listening, nonBlocking: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-ignore-sigpipe"] CIgnoreSigpipe(): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-now"] CNow(): SYSTEM.INT64;
 
 (* Text building, for an Error's prefix *)
 
@@ -480,6 +482,56 @@ BEGIN
   IF r # WouldBlock THEN s.target := NIL END;
   RETURN Outcome(r, wantWrite, what, err)
 END FinishConnect;
+
+(* Deadlines *)
+
+(* The monotonic clock in milliseconds, from an arbitrary start: for
+   measuring time, never for the time of day. *)
+PROCEDURE Now*(): LONGINT;
+BEGIN
+  RETURN SYSTEM.VAL(LONGINT, CNow())
+END Now;
+
+(* Gives s a deadline ms milliseconds from now, on the monotonic clock,
+   which the time of day being set doesn't move; ms = 0 clears it.
+   SocketTasks' calls on s that would wait past it return timedOut
+   instead; s stays usable, and a caller may set another and try again.
+   Sockets' own calls never wait in a task, so they ignore it. Halts
+   (AssertArgument) for a negative ms. *)
+PROCEDURE SetDeadline*(s: Socket; ms: LONGINT);
+BEGIN
+  ASSERT(s.fd # -1, AssertClosed);
+  ASSERT(ms >= 0, AssertArgument);
+  IF ms = 0 THEN s.deadline := 0
+  ELSE s.deadline := Now() + ms
+  END
+END SetDeadline;
+
+(* For SocketTasks: the milliseconds left before s's deadline, 0 once it
+   has passed, or -1 if s has none. *)
+PROCEDURE TimeLeft*(s: Socket): LONGINT;
+  VAR left: LONGINT;
+BEGIN
+  IF s.deadline = 0 THEN RETURN -1 END;
+  left := s.deadline - Now();
+  IF left < 0 THEN left := 0 END;
+  RETURN left
+END TimeLeft;
+
+(* For SocketTasks: sets err to timedOut, its text "<what>: timed out",
+   or for a connection still being made, "connect to <host> port <p>:
+   timed out". *)
+PROCEDURE TimedOut*(s: Socket; VAR err: Error; what: ARRAY OF CHAR);
+BEGIN
+  err.kind := timedOut; err.want := 0; err.code := 0; err.text[0] := 0X;
+  IF s.target # NIL THEN
+    Append(err.text, "connect to "); Append(err.text, s.target.host);
+    Append(err.text, " port "); AppendInt(err.text, s.target.port);
+    s.target := NIL
+  ELSE Append(err.text, what)
+  END;
+  Append(err.text, ": timed out")
+END TimedOut;
 
 (* Waits *)
 

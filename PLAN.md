@@ -144,8 +144,10 @@ sends RST instead of FIN, and the peer may lose the end of what was
 written to it. A server that ends a response by closing should shut
 down its writing side, read and discard until end of stream or a short
 deadline, then close (the "lingering close"). The Gemini server needs
-this; a `SocketTasks` helper for it is likely (Phase 5: without a
-deadline, a peer that never closes would hold the task for ever).
+this, so `SocketTasks.LingeringClose(s, ms): BOOLEAN` does it (Phase
+5): `TRUE` if the peer closed within `ms`, and `s` closed either way.
+`ms` must be positive (halt 84): without a limit, a peer that never
+closes would hold the task for ever.
 
 **No finalizer closes a socket** (decided 2026-11-15). polibtls's
 `Connection` holds only the descriptor, so a `Socket` that became
@@ -240,12 +242,14 @@ formats the number for `getaddrinfo` with `AI_NUMERICSERV`.
 
   `SocketTasks.Connect` loops over `Resolve`'s addresses with
   `ConnectTo` and `FinishConnect`, as blocking `Connect` does in C.
+  Both take a time limit `ms` (0: none) rather than a deadline, since
+  the socket they make doesn't exist before the call (Phase 5).
   (Happy Eyeballs, racing the families, is a later refinement on the
   same halves, if a user needs it.)
 - A blocking `Connect` has no timeout of its own: to an address that
   doesn't answer it waits for the kernel to give up (about two minutes
   on Linux, by `tcp_syn_retries`). Documented; a caller that minds uses
-  `SocketTasks`, whose deadlines cover connecting.
+  `SocketTasks.Connect` or `ConnectTo` with a time limit.
 - `ListenUnix(path, backlog, ...)`, `ConnectUnix(path, ...)`: the path
   is the caller's to remove; posockets never unlinks a file it didn't
   make, and doesn't remove a stale socket file before binding (an
@@ -401,8 +405,8 @@ is in reach, and it solves stopping a server (Tasks) too.
   tasks. Trap 20 as `AwaitReadable`'s: a negative descriptor, or any
   call on VMS (POSIX only, as descriptor waits are). Checked on Linux
   and the three BSD VMs by Peaseblossom's fixtures `llvm-tasks-timed`
-  and `llvm-tasks-traps` (cases 17, 18); not yet re-checked here
-  (Phase 5).
+  and `llvm-tasks-traps` (cases 17, 18); re-checked here on sockets
+  in Phase 5.
 - Here: a deadline is a time on the socket (`SetDeadline(s, ms)`, 0
   for none; Sockets and closing). Each `SocketTasks` wait passes the
   time remaining to the timed wait, and on `FALSE` returns `timedOut`.
@@ -414,10 +418,22 @@ is in reach, and it solves stopping a server (Tasks) too.
   down, and the caller may set a new deadline and try again (as the
   accept loop does). A partly done `WriteAll` reports the bytes
   written in `n`.
+- `Connect` and `ConnectTo` make their socket, so a deadline can't be
+  set on it beforehand: they take a time limit `ms` instead (0: none),
+  decided 2026-11-15. `Connect`'s covers all the addresses together;
+  each address still gets at least 1 ms, so one that connects at once
+  does, and the error names the last address tried. Resolving isn't
+  counted (Open questions). The socket returned has no deadline.
+- Two tasks waiting on one socket share its deadline (one field).
+  A proxy that wants separate limits for reading and writing sets the
+  deadline before each call; nothing more is offered until a user
+  needs it.
 - Phase 5 depends on the upstream change, which is pushed but in no
   poc release yet: the installed poc is 0.12.0, so until the next
-  release Phase 5 builds against the Peaseblossom checkout. Phases 1-4
-  don't need it.
+  release posockets builds only with a poc built from the Peaseblossom
+  checkout (AGENTS.md, "Build"). Phases 1-4 don't need it, and the
+  copy `make install` put in `~/.local/lib/poc` on 2026-11-15, for
+  polibtls on 0.12.0, is Phase 4's.
 
 Considered and set aside: a watchdog task per socket that `shutdown`s
 it at the deadline (works with today's `Tasks`, but doubles the
@@ -458,6 +474,11 @@ Recorded as found, each with the `#ifdef` that handles it:
 - `shutdown` on a listening socket: wakes a blocked `accept` with
   `EINVAL` on Linux; on the BSDs it fails with `ENOTCONN` and wakes
   nothing (to be confirmed; matters for stopping a server).
+- A full listen queue: on Linux a loopback connect past it hangs (the
+  SYN is dropped), which `TestDeadline` relies on for a connect that
+  times out. A BSD may refuse it instead or behave otherwise; if so,
+  that check needs another way to stall a connect there (Phase 5).
+- `CLOCK_MONOTONIC` (`Sockets.-now`): POSIX, on all four.
 
 ### Halt codes
 
@@ -507,8 +528,10 @@ valgrind with `poc-gc.supp`, and descriptors counted:
   for it. The refused port can in principle be taken by another
   process between the close and the connect; accepted as a rare,
   recognisable flake on a busy machine.
-- `TestDeadline`: a client that sends nothing is cut off near its
-  deadline, and one that sends in time is not.
+- `TestDeadline` (Phase 5): reads cut off near their deadline, and not
+  when data comes in time; sockets usable after a timeout; `WriteAll`
+  timing out partway; an accept loop stopping on a flag; connecting
+  to a full queue timing out; the lingering close.
 - `TestUnix`: `Pair`, and a listener and client on a path under
   `build/`.
 - Halt tests for every code in Halt codes.
@@ -781,7 +804,7 @@ Done 2026-11-15:
   only as a POINTER TO base type").
 - `make test` and `make valgrind` pass.
 
-### Phase 5: deadlines
+### Phase 5: deadlines [done]
 
 Needs the timed descriptor wait in poc's `Tasks` (Deadlines), done in
 Peaseblossom on 2026-11-15 with its own tests, but not yet in a poc
@@ -793,6 +816,51 @@ close (moved from Phase 4: Sockets and closing). `TestDeadline`: a
 client that sends nothing is cut off near its deadline, one that sends
 in time is not, a socket is usable after a timeout, and an accept loop
 stops within its interval.
+
+Done 2026-11-15, built and tested with a poc built from the
+Peaseblossom checkout (HEAD 73109d2 onward; it still calls itself
+0.12.0) in a scratch prefix, since the installed 0.12.0 has no
+`AwaitReadableFor`:
+
+- Re-checked first, by throwaway programs on a Unix-domain pair and on
+  TCP over `127.0.0.1`: `AwaitReadableFor` with data coming at 50 ms
+  and a 1000 ms limit gave `TRUE` after 50 ms; with no data and 100 ms,
+  `FALSE` after 100-101 ms; with 0 ms, `FALSE` at once, or `TRUE` at
+  once if data was already there. An untimed wait still worked after a
+  timeout. `AwaitWritableFor` gave `TRUE` at once on an empty buffer,
+  and `FALSE` after 100 ms on a full one.
+- `Sockets`: `Now()` (the C part's `CLOCK_MONOTONIC`, in ms),
+  `SetDeadline(s, ms)` (from now; 0 clears it; halts 80 on a closed
+  socket, 84 for a negative `ms`), `TimeLeft(s)` (-1 for none, else
+  never below 0) and `TimedOut(s, err, what)`, which fills in a
+  `timedOut` error ("recv: timed out", or "connect to 127.0.0.1 port
+  N: timed out" while a connect is in progress). `TimeLeft` and
+  `TimedOut` are for `SocketTasks`, as `BeginWait` is.
+- `SocketTasks`: every wait goes through one `Await`, which passes the
+  time left to `AwaitReadableFor`/`AwaitWritableFor`, or waits untimed
+  with no deadline (Deadlines). `Connect`/`ConnectTo` take `ms`; the
+  callers of Phase 4's signatures (`TestTasks`) pass 0. polibtls
+  hasn't used them yet. `LingeringClose` (Sockets and closing).
+- **A full listen queue makes a loopback connect hang** on Linux: with
+  backlog 0, one connection is queued and later SYNs are dropped
+  (`tcp_syncookies` = 1, `tcp_abort_on_overflow` = 0 on the test
+  host), so the connect neither completes nor is refused. `TestDeadline`
+  uses this for a connect that times out without reaching outside the
+  machine. Unknown on the BSDs (Portability; Phase 9).
+- `TestDeadline` (21 checks), with a watchdog: a `Read` cut off near
+  its deadline, then the same socket reading what comes in time; a
+  deadline already past still taking data that is there; 0 clearing a
+  deadline; `WriteAll` to a peer that doesn't read, with 4096-byte
+  buffers, timing out with `0 < n < len`; an accept loop with a 100 ms
+  deadline accepting one connection, timing out at least twice, and
+  stopping within its interval of the flag being set; `ConnectTo` and
+  `Connect` to a full queue timing out at 200 ms, naming the address;
+  `LingeringClose` `TRUE` when the peer writes and closes, and `FALSE`
+  near 200 ms when it never closes, the peer then reading end of
+  stream; descriptors back to their count at the start. `HaltDeadline`
+  for 84. `strace -f -e trace=poll` showed 21 `poll`s, 14 of them
+  ending by timeout, so the waits happened.
+- `make test` and `make valgrind` pass (TestDeadline in `TASKTESTS`).
 
 ### Phase 6: Unix-domain sockets
 
@@ -859,7 +927,8 @@ difference behind an `#ifdef` and add it to Portability.
   wait added to `Tasks` upstream?~~ Decided 2026-11-15: a timed wait
   added to poc's `Tasks` (Deadlines), and added there the same day
   (`AwaitReadableFor`/`AwaitWritableFor`).
-- **Asynchronous name resolution.** `getaddrinfo` stops every task.
+- **Asynchronous name resolution.** `getaddrinfo` stops every task,
+  and isn't counted in `SocketTasks.Connect`'s time limit.
   Options if a user needs names resolved while serving: resolve in a
   child process and read the answer through a pipe; `getaddrinfo_a`
   (glibc only); or a small DNS client of our own. Not needed by the
