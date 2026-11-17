@@ -67,8 +67,9 @@ behind a proxy. Its needs beyond polibtls's go here as they appear.
 
 - **`Sockets`** (`src/Sockets.Mod`, with its C part `src/Sockets.c`):
   the `Socket` and `Address` types, errors, names, and every operation,
-  blocking or not. It imports only `SYSTEM` and `Platform`, never
-  `Tasks`, so a program that doesn't use tasks doesn't link them.
+  blocking or not. It imports only `SYSTEM` and poDateTime's `Clocks`
+  (since 2026-11-16), never `Tasks`, so a program that doesn't use
+  tasks doesn't link them.
 - **`SocketTasks`** (`src/SocketTasks.Mod`): `Accept`, `Connect`,
   `Read`, `Write`, `WriteAll` that wait through `Tasks` on a
   non-blocking socket, and deadlines. Pure Oberon over `Sockets`.
@@ -123,8 +124,8 @@ is a cache: a caller that changes the mode behind posockets' back (with
 They live in `SocketDesc` because `Close`, in `Sockets`, must see
 `waiters`, and `Sockets` never imports `Tasks`. Read-only export means
 `SocketTasks` can't assign them, so `Sockets` exports the procedures
-that do: `SetDeadline(s, ms)` (from now, on the C part's monotonic
-clock; 0 clears it), which any caller may use, and `BeginWait(s)` /
+that do: `SetDeadline(s, ms)` (from now, on poDateTime's monotonic
+clock, the C part's until 2026-11-16; 0 clears it), which any caller may use, and `BeginWait(s)` /
 `EndWait(s)`, which are for `SocketTasks` only and say so.
 
 `Close(s)` closes the descriptor and sets `fd` to -1; on a closed
@@ -1096,6 +1097,34 @@ were made to take each system's answer, and the comments and README
 - `TestUnix` used to halt on the BSDs at its 107-byte path, and the
   run's count of `FAIL` lines missed it: a host's run is judged by
   make's exit status, and halts are counted too.
+
+### poDateTime's clock [done]
+
+Peaseblossom's PLAN.md, "Ongoing library enhancements" 7, step 3
+(2026-11-16): posockets, polibtls and pogemini give up their own
+monotonic clocks for poDateTime's (`~/Repos/Oberon/poDateTime`), so
+that one clock, tested on every host poc runs on, VAX/VMS included,
+serves them all.
+
+- `Sockets.Now` is `Clocks.Monotonic() DIV 1000000`: the same
+  milliseconds from an arbitrary start, which setting the time of day
+  doesn't move, so its interface and `deadline-` are unchanged. The C
+  part's `now` (`clock_gettime(CLOCK_MONOTONIC)`) is gone, and with it
+  `<time.h>`.
+- poDateTime is now a dependency of the library: its manifest records
+  `needs podatetime`, and a program using posockets needs poDateTime
+  on its library path (installed in the same place, it is). The
+  makefile takes it from `PODATETIME` (default `POCLIBDIR`), after
+  `build/lib`, so an installed posockets never hides this checkout's,
+  and stops, saying so, unless that poDateTime's manifest names the poc
+  in use. poDateTime needs only poc 0.10.1, so posockets' least poc
+  stays 0.13.0.
+- `make test` (213 checks) and `make valgrind` passed on Linux with
+  poc 0.14.0 and poDateTime 5ae9a47; `make install` into a scratch
+  directory worked, and `EchoServer` built from there. `gmake test`
+  passed on alerik, artos and yishana (211 checks each) and on jherek
+  and cymoril (209), with poDateTime installed in the run's own
+  directory; the only `assertion failed` lines were the 14 halt tests'.
 
 ## Open questions
 

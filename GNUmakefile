@@ -3,8 +3,9 @@
 #
 # The library posockets is built in $(LIBDIR), with each module's C part
 # (src/<Module>.c beside src/<Module>.Mod) compiled and archived with it.
-# It links nothing beyond libc, so neither the library nor a program using
-# it needs flags. The tests and examples take the library from there, so
+# It links nothing beyond libc and poDateTime, so neither the library nor a
+# program using it needs flags, though poDateTime must be on the program's
+# library path. The tests and examples take the library from there, so
 # they test this checkout and what make install would install.
 #
 # poc writes each module's .sym, .ll and .o, and the programs, into $(BUILD).
@@ -18,6 +19,11 @@
 POC      ?= poc
 PREFIX ?= $(HOME)/.local
 POCLIBDIR ?= $(PREFIX)/lib/poc
+# poDateTime (~/Repos/Oberon/poDateTime), installed, is a dependency of
+# the library: Sockets takes its monotonic clock (Clocks) for deadlines.
+# It must have been built by this poc, which refuses a library another
+# poc built, so make stops at once, saying so, if $(PODATETIME) has none.
+PODATETIME ?= $(POCLIBDIR)
 # The size model: decided in PLAN.md, "Integer model"; never mix models.
 POCFLAGS := -OC
 MODELS := OC
@@ -53,6 +59,19 @@ variant-flags = -$(firstword $(subst -, ,$(1))) $(if $(filter %-g,$(1)),-g)
 # A library records the poc that built it, and another poc refuses it, so
 # each library depends on poc itself.
 POCBIN := $(shell command -v $(POC))
+# poc's version and target, as a library's manifest records them.
+POCVERSION := $(shell $(POC) -version | sed -n '1s/^poc \([^ ]*\).*/\1/p')
+TRIPLE := $(shell $(POC) -version | sed -n 's/^target \([^ ]*\).*/\1/p')
+PODATETIME_MANIFEST := $(PODATETIME)/$(TRIPLE)/OC/podatetime.library
+# Only clean, uninstall and doc build nothing.
+ifneq ($(if $(MAKECMDGOALS),$(filter-out clean uninstall doc,$(MAKECMDGOALS)),all),)
+ifneq ($(shell grep -qx 'poc $(POCVERSION)' $(PODATETIME_MANIFEST) 2>/dev/null && echo yes),yes)
+$(error no poDateTime built by poc $(POCVERSION) in $(PODATETIME): install it there (make install in poDateTime's checkout), or give make PODATETIME=<dir>)
+endif
+endif
+# Where a program finds posockets and what it needs: this checkout's
+# library first, so an installed posockets is never taken in its place.
+LIBPATH := -library-path $(LIBDIR) -library-path $(PODATETIME)
 
 # The modules and their C parts, whichever have one.
 LIBSRC := $(LIBMODS:%=src/%.Mod) $(wildcard $(LIBMODS:%=src/%.c))
@@ -99,23 +118,23 @@ $(BUILD):
 $(LIBDIR)/$(LIBRARY)-%.stamp: $(LIBSRC) $(POCBIN) | $(BUILD)
 	mkdir -p $(LIBDIR)
 	cd src && $(POC) $(call variant-flags,$*) -output-dir $(abspath $(LIBDIR)) \
-	  -library $(LIBRARY) $(LIBMODS:%=%.Mod)
+	  -library-path $(abspath $(PODATETIME)) -library $(LIBRARY) $(LIBMODS:%=%.Mod)
 	touch $@
 
 $(BUILD)/Test%: test/Test%.Mod test/Check.Mod test/TestHelp.Mod test/TestHelp.c test/Run.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
-	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -import-path test -output-dir $(BUILD) -o $@ $<
+	$(POC) $(POCFLAGS) $(LIBPATH) -import-path test -output-dir $(BUILD) -o $@ $<
 
 $(HELPERBINS): $(BUILD)/%: test/%.Mod test/TestHelp.Mod test/TestHelp.c $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
-	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -import-path test -output-dir $(BUILD) -o $@ $<
+	$(POC) $(POCFLAGS) $(LIBPATH) -import-path test -output-dir $(BUILD) -o $@ $<
 
 $(BUILD)/Halt%: test/Halt%.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
-	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -output-dir $(BUILD) -o $@ $<
+	$(POC) $(POCFLAGS) $(LIBPATH) -output-dir $(BUILD) -o $@ $<
 
 $(BUILD)/Example%: examples/Example%.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
-	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -output-dir $(BUILD) -o $@ $<
+	$(POC) $(POCFLAGS) $(LIBPATH) -output-dir $(BUILD) -o $@ $<
 
 $(EXAMPLEPROGBINS): $(BUILD)/%: examples/%.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)
-	$(POC) $(POCFLAGS) -library-path $(LIBDIR) -output-dir $(BUILD) -o $@ $<
+	$(POC) $(POCFLAGS) $(LIBPATH) -output-dir $(BUILD) -o $@ $<
 
 # Run every test from test/; report all, fail at the end if any failed.
 # Each halt test must exit with poc's ASSERT status and name its Assert
@@ -173,7 +192,7 @@ endef
 
 install: $(foreach v,$(VARIANTS),$(LIBDIR)/$(LIBRARY)-$(v).stamp)
 	$(foreach v,$(VARIANTS),$(POC) $(call variant-flags,$(v)) \
-	  -library-path $(LIBDIR) -install-library $(LIBRARY) -output-dir $(POCLIBDIR)$(newline))
+	  $(LIBPATH) -install-library $(LIBRARY) -output-dir $(POCLIBDIR)$(newline))
 
 # uninstall removes from $(POCLIBDIR)/<triple>/<variant> what install put
 # there. It leaves other libraries' files alone, and removes a directory only

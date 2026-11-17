@@ -222,7 +222,7 @@ A Unix-domain stream connection to the listener at path, as s, blocking unless n
 PROCEDURE Now*(): LONGINT;
 ```
 
-The monotonic clock in milliseconds, from an arbitrary start: for measuring time, never for the time of day.
+The monotonic clock in milliseconds, from an arbitrary start: for measuring time, never for the time of day. It is poDateTime's (Clocks.Monotonic, in ns), which setting the time of day doesn't move.
 
 #### SetDeadline
 

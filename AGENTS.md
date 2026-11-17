@@ -46,23 +46,29 @@ build, the test and valgrind runners, and `Sockets` with its C part:
 the socket's deadline; the examples `EchoServer`, `EchoClient`,
 `Netcat`, `Forward` and `FileServer`, each tested from outside; and the
 reference in `doc/`; tested on Linux, FreeBSD, OpenBSD and NetBSD.
-Phase 7, socket options, waits for a user to ask for one.
+Phase 7, socket options, waits for a user to ask for one. Since
+2026-11-16 `Sockets.Now`, and so the deadlines, take poDateTime's
+monotonic clock (PLAN.md, "poDateTime's clock": Peaseblossom's
+"Ongoing library enhancements" 7, step 3).
 
-**Phase 5 needs poc 0.13.0 or later** (`Tasks.AwaitReadableFor`).
-This machine (atla) and the BSD hosts have 0.13.0, so a plain `make
-test` works; `make test` and `make valgrind` passed with atla's
-`/usr/bin/poc` 0.13.0 on 2026-11-15. The copy in `~/.local/lib/poc`,
-which polibtls uses, is Phase 4's (commit 72e218a), installed with
-0.12.0; reinstall from this tree only when the user says, once
-polibtls is on 0.13.0.
+**poc 0.13.0 or later** (`Tasks.AwaitReadableFor`), **and poDateTime
+built by the same poc.** This machine (atla) and the BSD hosts have
+0.14.0 since 2026-11-16. A poc library works only with the poc that
+built it, so the poDateTime the library needs (`PODATETIME`, default
+`POCLIBDIR`) must come from the same poc; without it, make stops,
+saying so. The copies of poDateTime and posockets in
+`~/.local/lib/poc`, which polibtls and pogemini use, were installed
+with 0.14.0 on 2026-11-16. After a poc upgrade, reinstall them, each
+from a `git archive` of its commit by `make install`.
 
 ## Reference material
 
 | What | Where |
 |---|---|
-| poc | installed from the Peaseblossom RPM: `/usr/bin/poc` (0.13.0 since 2026-11-15), its runtime `poc-rtl` under `/usr/lib/poc`; `poc(1)`, `/usr/share/doc/peaseblossom/` |
+| poc | installed from the Peaseblossom RPM: `/usr/bin/poc` (0.14.0 since 2026-11-16), its runtime `poc-rtl` under `/usr/lib/poc`; `poc(1)`, `/usr/share/doc/peaseblossom/` |
 | poc source | `~/Repos/Oberon/Peaseblossom` (`doc/users-guide.md`, `doc/reference-guide.md`, `doc/developer/language-extensions.md`) |
 | poc's runtime | `~/Repos/Oberon/Peaseblossom/rtl/llvm/`: `Platform.Mod`/`.c` (descriptors, `errno`, signals), `Tasks.Mod`, `TaskWaiting.Mod`/`.c` (the `poll` loop), and `doc/developer/tasks.md` (the design of `Tasks`) |
+| poDateTime | `~/Repos/Oberon/poDateTime`: `Clocks.Monotonic`, a `Durations.Duration` in ns, which `Sockets.Now` takes in ms |
 | Oberon-2 report | `~/Reference/Computer/Languages/Oberon/Oberon2.pdf`; plain text `Oberon2-layout.text`, `Oberon2-no-layout.text` |
 | Sockets API | the Linux man pages: `socket(7)`, `ip(7)`, `ipv6(7)`, `tcp(7)`, `unix(7)`, `getaddrinfo(3)`, `getnameinfo(3)`, `accept4(2)`, `connect(2)` (`EINPROGRESS`), `send(2)` (`MSG_NOSIGNAL`); POSIX for what the BSDs share |
 | polibtls | `~/Repos/Oberon/polibtls` (the first user) |
@@ -77,8 +83,11 @@ default), with `POC` from `PATH`, output under `build/` via
 installed copy is never tested in place of this checkout. `LIBMODS`
 lists the library's modules, and `LIBSRC` takes each one's C part
 (`src/<Module>.c`) if it has one. The library
-links nothing beyond libc, so a program using posockets passes no
-flags. polibtls's TCP tests take the installed library, so a change
+links nothing beyond libc and poDateTime, so a program using posockets
+passes no flags, though poDateTime must be on its library path.
+poDateTime comes from `PODATETIME` (default `POCLIBDIR`), after
+`build/lib` on the library path, so an installed posockets there never
+hides this checkout's. polibtls's TCP tests take the installed library, so a change
 here that polibtls depends on means `make install` before testing
 there.
 
@@ -128,12 +137,15 @@ descriptor check only.
 
 Phase 9 ran `gmake test` on FreeBSD 15.1 amd64 (alerik), OpenBSD 7.9
 i386 (cymoril) and amd64 (jherek), and NetBSD 11.0 amd64 (artos) and
-i386 (yishana), each with poc 0.13.0; rackhir (FreeBSD) builds
+i386 (yishana), each with poc 0.13.0, and again with 0.14.0 for the
+move to poDateTime's clock (2026-11-16); rackhir (FreeBSD) builds
 packages, so ask before using it. Log in by `ssh <host>`, put
 `/usr/pkg/bin:/usr/local/bin` on `PATH`, and use `gmake`. Copy the
 working tree there (`tar` less `build/` and `.git`) into a directory
-under `~/tmp` and remove it when done; never work in a checkout on the
-host. There is no valgrind there. Judge a run by make's exit status
+under `~/tmp`, with poDateTime from a `git archive`, installed by
+`gmake install POCLIBDIR=<dir>` there and passed as `gmake test
+PODATETIME=<dir>`; remove it all when done, and never work in a
+checkout on the host. There is no valgrind there. Judge a run by make's exit status
 and count `assertion failed` lines as well as `FAIL`: a test that
 halts prints no `FAIL` (`TestUnix` hid a halt this way).
 

@@ -36,13 +36,18 @@ roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
 - poc 0.13.0 or later: the deadlines need `Tasks.AwaitReadableFor`.
   poc 0.12.0 builds the Phase 4 version (commit 72e218a).
+- [poDateTime](https://github.com/tkurtbond/poDateTime), installed by
+  the same poc, for its monotonic clock, which `Sockets.Now` and the
+  deadlines read. make looks for it where it installs posockets, in
+  `~/.local/lib/poc`; give `make PODATETIME=<dir>` if it is elsewhere.
+  Without it, make stops, saying so.
 - Linux, FreeBSD, OpenBSD or NetBSD, on amd64 or i386: tested on
   Fedora 44, FreeBSD 15.1, OpenBSD 7.9 and NetBSD 11.0 (PLAN.md,
   Phase 9). On the BSDs, build with GNU make (`gmake`).
 - valgrind, for `make valgrind` (Linux).
 
-The library links nothing beyond the C library, so a program using it
-needs no extra flags.
+The library links nothing beyond the C library and poDateTime, so a
+program using it needs no extra flags.
 
 Two things a program using `SocketTasks` meets that come from poc's
 `Tasks`, not from posockets:
@@ -174,8 +179,10 @@ make clean
 ```
 
 A program then compiles against the installed library with
-`poc -OC -library-path ~/.local/lib/poc Program.Mod`. The library is
-built for poc's `-OC` size model only.
+`poc -OC -library-path ~/.local/lib/poc Program.Mod`. poDateTime must
+be on the library path too (it is, installed in the same place). The
+library is built for poc's `-OC` size model only. A library works only
+with the poc that built it, so install again after upgrading poc.
 
 ## License
 

@@ -26,7 +26,7 @@ MODULE Sockets; (* TCP and Unix-domain sockets for poc *)
    Now, and TimeLeft and TimedOut for SocketTasks. Phase 6: ListenUnix
    and ConnectUnix. *)
 
-IMPORT SYSTEM;
+IMPORT SYSTEM, Clocks;
 
 CONST
   (* Address families, Socket.family and Address.family *)
@@ -152,7 +152,6 @@ PROCEDURE ["C", "Sockets.-set-nonblocking"] CSetNonBlocking(fd: SYSTEM.INT64;
 PROCEDURE ["C", "Sockets.-adopt"] CAdopt(fd: SYSTEM.INT64;
   VAR family, listening, nonBlocking: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-ignore-sigpipe"] CIgnoreSigpipe(): SYSTEM.INT32;
-PROCEDURE ["C", "Sockets.-now"] CNow(): SYSTEM.INT64;
 PROCEDURE ["C", "Sockets.-unix-path-max"] CUnixPathMax(): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-listen-unix"] CListenUnix(path: ARRAY OF CHAR;
   pathLen: SYSTEM.INT64; backlog, nonBlocking: SYSTEM.INT32;
@@ -568,10 +567,12 @@ END ConnectUnix;
 (* Deadlines *)
 
 (* The monotonic clock in milliseconds, from an arbitrary start: for
-   measuring time, never for the time of day. *)
+   measuring time, never for the time of day. It is poDateTime's
+   (Clocks.Monotonic, in ns), which setting the time of day doesn't
+   move. *)
 PROCEDURE Now*(): LONGINT;
 BEGIN
-  RETURN SYSTEM.VAL(LONGINT, CNow())
+  RETURN SYSTEM.VAL(LONGINT, Clocks.Monotonic() DIV 1000000)
 END Now;
 
 (* Gives s a deadline ms milliseconds from now, on the monotonic clock,
