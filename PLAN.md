@@ -460,6 +460,18 @@ wait in `Tasks`, polibtls's own loops can take a deadline the same way;
 that belongs in polibtls's PLAN.md. A Gemini server can also still
 `Shutdown` a connection from another task to cut off a TLS wait.
 
+**Deadlines without tasks** (Phase 10, decided 2026-11-18, for
+pogeminilib's blocking client): a program without tasks keeps its
+socket non-blocking and, on `wouldBlock`, calls `Sockets.Await(s,
+err.want, what, err)`, which waits in the kernel (`poll`) until `s` is
+ready or its deadline passes, `timedOut` then as `SocketTasks`' waits
+give it. No deadline: it waits as long as it takes; one already past:
+it polls once. `Sockets.ConnectWithin(host, port, ms, nonBlocking, s,
+err)` is `SocketTasks.Connect` built on it, leaving `s` blocking unless
+asked otherwise. polibtls's blocking `Tls` calls on a non-blocking
+socket give `wouldBlock` with the direction to wait in, so a blocking
+TLS client bounds every step this way, with no change to polibtls.
+
 ### Portability
 
 Recorded as found, each with the `#ifdef` that handles it:
@@ -1125,6 +1137,54 @@ serves them all.
   passed on alerik, artos and yishana (211 checks each) and on jherek
   and cymoril (209), with poDateTime installed in the run's own
   directory; the only `assertion failed` lines were the 14 halt tests'.
+
+### Phase 10: deadlines without tasks [done]
+
+For pogeminilib's blocking client (its PLAN.md, "The client"), which
+needs a time limit on connecting and on each read and write without
+`Tasks` (Deadlines, "Deadlines without tasks").
+
+Done 2026-11-18:
+
+- `Sockets.Await(s, want, what, err)`: the C part's `await` is one
+  `poll` with the time left (clamped to `INT_MAX`; -1 with no deadline)
+  and gives back 0, a timeout, or `errno`. The Oberon side calls it
+  again on `EINTR` (a new index, 10, of `errno-value`, kept private),
+  and after a timeout while `TimeLeft` is still above 0, since `poll`
+  counts whole milliseconds. Any `revents` counts as ready, so an error
+  or a hang-up is left to the call that follows. Halts 80 on a closed
+  socket, 84 for a `want` that is neither (`HaltAwait`). It doesn't
+  count in `waiters`: nothing else runs while it waits.
+- `Sockets.ConnectWithin(host, port, ms, nonBlocking, s, err)`:
+  `SocketTasks.Connect`'s loop over the addresses, each a non-blocking
+  `ConnectTo`, then `SetDeadline`, `Await(wantWrite)` and
+  `FinishConnect`; it comes after `SetNonBlocking` in the source,
+  which it calls to make `s` blocking again unless `nonBlocking`.
+- `SetDeadline`'s comment now says `Await` honours it, and the module's
+  says which phase added what.
+- `TestAwait` (22 checks), with no tasks, so memcheck follows it: a
+  connection seen queued on a listener; a peer that sends nothing timed
+  out near 200 ms, the socket then still open with nothing to read;
+  data seen before the deadline, past it, and with none; a peer's close
+  making the socket ready, `Read` then `closed`; an empty send buffer
+  writable, and writes to a peer that doesn't read (4096-byte buffers),
+  each `wouldBlock` followed by an `Await`, timing out near 200 ms;
+  `ConnectWithin` blocking, non-blocking, with no limit, refused at
+  once, to a name that doesn't resolve, and timed out at 200 ms against
+  a full queue (or reset at once, on FreeBSD), naming the address;
+  descriptors back to their count. `strace -f -e trace=poll` showed 18
+  `poll`s, 3 of them ending by timeout.
+- **On OpenBSD a full send buffer has room again at once**: the first
+  `Await(wantWrite)` after writing to a peer that doesn't read gave
+  `TRUE` at 0 ms on erekose, and only later rounds timed out (206-210
+  ms for 200), the loopback delivering a moment after `send` returns
+  (Portability). So the test writes and awaits in a loop, as a client
+  would, rather than awaiting once.
+- `make test` (236 checks) and `make valgrind` passed on Linux, and
+  `gmake test` on erekose (OpenBSD 7.9 i386, 231) and terhali (NetBSD
+  11.0 amd64, 233), the only `assertion failed` lines the 15 halt
+  tests'. `TestAwait` looks up `nonexistent.invalid` before counting
+  descriptors, as `TestErrors` does, for NetBSD's resolver.
 
 ## Open questions
 

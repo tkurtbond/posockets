@@ -24,7 +24,8 @@ MODULE Sockets; (* TCP and Unix-domain sockets for poc *)
    SetNonBlocking, Adopt and IgnoreBrokenPipe, for TCP. Phase 4:
    BeginWait and EndWait, for SocketTasks. Phase 5: SetDeadline, and
    Now, and TimeLeft and TimedOut for SocketTasks. Phase 6: ListenUnix
-   and ConnectUnix. *)
+   and ConnectUnix. Phase 10: Await and ConnectWithin, deadlines without
+   tasks. *)
 
 IMPORT SYSTEM, Clocks;
 
@@ -67,6 +68,7 @@ CONST
   (* The C part's results beside 0 and errno values: a non-blocking call
      needs a wait; Listen found more addresses than its array holds. *)
   WouldBlock = -1;
+  TimedOutMark = -2;      (* the C part's await: the time ran out *)
   TooMany = 99;
 
 TYPE
@@ -108,6 +110,7 @@ VAR
   ECONNREFUSED-, ECONNRESET-, EPIPE-, EADDRINUSE-, EMFILE-, ENFILE-,
   EAFNOSUPPORT-, EADDRNOTAVAIL-, ENOENT-, EAGAIN-: INTEGER;
 
+  EINTR: INTEGER;          (* Await calls poll again *)
   unixPathMax: INTEGER;    (* sun_path's size, terminator included *)
 
 PROCEDURE ["C", "Sockets.-errno-value"] CErrnoValue(which: SYSTEM.INT32): SYSTEM.INT32;
@@ -141,6 +144,8 @@ PROCEDURE ["C", "Sockets.-connect"] CConnect(host: ARRAY OF CHAR;
 PROCEDURE ["C", "Sockets.-connect-to"] CConnectTo(host: ARRAY OF CHAR;
   hostLen: SYSTEM.INT64; port, nonBlocking: SYSTEM.INT32;
   VAR fd: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-await"] CAwait(fd: SYSTEM.INT64; want: SYSTEM.INT32;
+  ms: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-finish-connect"] CFinishConnect(fd: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-recv"] CRecv(fd: SYSTEM.INT64; buf: SYSTEM.ADDRESS;
   pos, len: SYSTEM.INT64; VAR n: SYSTEM.INT64): SYSTEM.INT32;
@@ -578,9 +583,10 @@ END Now;
 (* Gives s a deadline ms milliseconds from now, on the monotonic clock,
    which the time of day being set doesn't move; ms = 0 clears it.
    SocketTasks' calls on s that would wait past it return timedOut
-   instead; s stays usable, and a caller may set another and try again.
-   Sockets' own calls never wait in a task, so they ignore it. Halts
-   (AssertArgument) for a negative ms. *)
+   instead, and so does Await; s stays usable, and a caller may set
+   another and try again. Sockets' other calls ignore it: a blocking one
+   waits in the kernel as long as it takes, a non-blocking one never
+   waits. Halts (AssertArgument) for a negative ms. *)
 PROCEDURE SetDeadline*(s: Socket; ms: LONGINT);
 BEGIN
   ASSERT(s.fd # -1, AssertClosed);
@@ -613,6 +619,36 @@ BEGIN
   END;
   Append(err.text, ": timed out")
 END TimedOut;
+
+(* Waits, in the kernel, until s is ready in the direction want says
+   (wantRead or wantWrite), or its deadline passes: then FALSE, with err
+   timedOut, its text as TimedOut gives it from what. With no deadline
+   it waits as long as it takes; with one already past it still looks
+   once, without waiting. "Ready" includes an error or a hang-up on s,
+   which the call that follows reports. A signal doesn't end the wait.
+
+   This is the blocking counterpart of SocketTasks' waits, for a program
+   without tasks that keeps a socket non-blocking to bound each step of
+   an exchange: call, and on wouldBlock Await err.want, and call again.
+   It stops every task while it waits. Halts (AssertClosed) on a closed
+   s, (AssertArgument) for any other want. *)
+PROCEDURE Await*(s: Socket; want: INTEGER; what: ARRAY OF CHAR;
+    VAR err: Error): BOOLEAN;
+  VAR r: SYSTEM.INT32;
+BEGIN
+  ASSERT(s.fd # -1, AssertClosed);
+  ASSERT((want = wantRead) OR (want = wantWrite), AssertArgument);
+  ClearError(err);
+  LOOP
+    r := CAwait(s.fd, want, TimeLeft(s));
+    IF r = 0 THEN RETURN TRUE
+    ELSIF r = TimedOutMark THEN
+      (* poll counts in whole ms, and may wake a little early by Now. *)
+      IF TimeLeft(s) = 0 THEN TimedOut(s, err, what); RETURN FALSE END
+    ELSIF r # EINTR THEN SetError(err, system, r, "poll"); RETURN FALSE
+    END
+  END
+END Await;
 
 (* Waits *)
 
@@ -714,6 +750,44 @@ BEGIN
   RETURN TRUE
 END SetNonBlocking;
 
+(* A connection to host and port, as SocketTasks.Connect makes it but
+   without tasks: each of host's addresses in getaddrinfo's order until
+   one connects, reporting the last error, in at most ms milliseconds
+   for them all (0: no limit), waiting in the kernel (Await). Resolving
+   the name isn't counted in ms. s is non-blocking if nonBlocking, else
+   blocking; on failure it is NIL, on success it has no deadline. Halts
+   (AssertArgument) for a port outside 0..65535 or a negative ms. *)
+PROCEDURE ConnectWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    nonBlocking: BOOLEAN; VAR s: Socket; VAR err: Error): BOOLEAN;
+  VAR addrs: ARRAY 16 OF Address; n, i: INTEGER; end, left: LONGINT;
+    ok: BOOLEAN;
+BEGIN
+  ASSERT(ms >= 0, AssertArgument);
+  s := NIL;
+  IF ~Resolve(host, port, addrs, n, err) THEN RETURN FALSE END;
+  end := Now() + ms; left := 0; ok := FALSE;
+  i := 0;
+  WHILE ~ok & (i < n) DO
+    IF ms > 0 THEN
+      (* Out of time: the next address still gets 1 ms, so a connection
+         that can be made at once is, and the error names the address. *)
+      left := end - Now(); IF left < 1 THEN left := 1 END
+    END;
+    ok := ConnectTo(addrs[i], TRUE, s, err);
+    IF ~ok & (err.kind = wouldBlock) THEN
+      SetDeadline(s, left);
+      REPEAT ok := Await(s, wantWrite, "connect", err) & FinishConnect(s, err)
+      UNTIL ok OR (err.kind # wouldBlock);
+      IF ok THEN SetDeadline(s, 0) ELSE Close(s); s := NIL END
+    END;
+    INC(i)
+  END;
+  IF ok & ~nonBlocking & ~SetNonBlocking(s, FALSE, err) THEN
+    Close(s); s := NIL; ok := FALSE
+  END;
+  RETURN ok
+END ConnectWithin;
+
 (* Wraps fd, a stream socket made elsewhere (inherited from a parent, or
    from systemd's socket activation), as s, taking its family, whether it
    is listening, and its mode from the kernel. s then owns fd: Close
@@ -751,5 +825,6 @@ BEGIN
   EMFILE := CErrnoValue(4); ENFILE := CErrnoValue(5);
   EAFNOSUPPORT := CErrnoValue(6); EADDRNOTAVAIL := CErrnoValue(7);
   ENOENT := CErrnoValue(8); EAGAIN := CErrnoValue(9);
+  EINTR := CErrnoValue(10);
   unixPathMax := CUnixPathMax()
 END Sockets.

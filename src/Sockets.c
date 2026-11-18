@@ -31,6 +31,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
@@ -63,6 +64,8 @@ enum { KIND_SYSTEM = 1, KIND_NAME = 2 };
 enum { TOO_MANY = 99 };
 
 #define WOULD_BLOCK (-1)
+/* Await: the time ran out. */
+#define TIMED_OUT (-2)
 
 static int would_block(int e)
 {
@@ -85,6 +88,7 @@ int32_t errno_value(int32_t which)
 	case 7: return EADDRNOTAVAIL;
 	case 8: return ENOENT;
 	case 9: return EAGAIN;
+	case 10: return EINTR;
 	default: return -1;
 	}
 }
@@ -699,6 +703,27 @@ int32_t finish_connect(int64_t fd)
 	if (getpeername((int)fd, (struct sockaddr *)&ss, &len) != 0)
 		return errno == ENOTCONN ? WOULD_BLOCK : errno;
 	return 0;
+}
+
+/* Await: polls fd until it is readable (want 1) or writable (want 2),
+   for at most ms (-1: no limit; clamped to INT_MAX). Returns 0 when it
+   is ready, or anything else happened to it (an error, a hang-up: the
+   call that follows says what), TIMED_OUT if the time ran out, or the
+   errno value, EINTR included, so that Oberon works out the time left
+   and calls again. */
+int32_t await_fd(int64_t fd, int32_t want, int64_t ms) NAME("await");
+int32_t await_fd(int64_t fd, int32_t want, int64_t ms)
+{
+	struct pollfd p;
+	int r;
+
+	p.fd = (int)fd;
+	p.events = want == 1 ? POLLIN : POLLOUT;
+	p.revents = 0;
+	r = poll(&p, 1, ms < 0 ? -1 : ms > INT_MAX ? INT_MAX : (int)ms);
+	if (r < 0)
+		return errno;
+	return r == 0 ? TIMED_OUT : 0;
 }
 
 /* Read: recv up to len bytes into buf + pos, *n of them. */

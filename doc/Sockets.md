@@ -230,7 +230,7 @@ The monotonic clock in milliseconds, from an arbitrary start: for measuring time
 PROCEDURE SetDeadline*(s: Socket; ms: LONGINT);
 ```
 
-Gives s a deadline ms milliseconds from now, on the monotonic clock, which the time of day being set doesn't move; ms = 0 clears it. SocketTasks' calls on s that would wait past it return timedOut instead; s stays usable, and a caller may set another and try again. Sockets' own calls never wait in a task, so they ignore it. Halts (AssertArgument) for a negative ms.
+Gives s a deadline ms milliseconds from now, on the monotonic clock, which the time of day being set doesn't move; ms = 0 clears it. SocketTasks' calls on s that would wait past it return timedOut instead, and so does Await; s stays usable, and a caller may set another and try again. Sockets' other calls ignore it: a blocking one waits in the kernel as long as it takes, a non-blocking one never waits. Halts (AssertArgument) for a negative ms.
 
 #### TimeLeft
 
@@ -247,6 +247,17 @@ PROCEDURE TimedOut*(s: Socket; VAR err: Error; what: ARRAY OF CHAR);
 ```
 
 For SocketTasks: sets err to timedOut, its text "<what>: timed out", or for a connection still being made, "connect to <host> port <p>: timed out". s may be NIL, for a wait with no socket yet.
+
+#### Await
+
+```oberon
+PROCEDURE Await*(s: Socket; want: INTEGER; what: ARRAY OF CHAR;
+    VAR err: Error): BOOLEAN;
+```
+
+Waits, in the kernel, until s is ready in the direction want says (wantRead or wantWrite), or its deadline passes: then FALSE, with err timedOut, its text as TimedOut gives it from what. With no deadline it waits as long as it takes; with one already past it still looks once, without waiting. "Ready" includes an error or a hang-up on s, which the call that follows reports. A signal doesn't end the wait.
+
+This is the blocking counterpart of SocketTasks' waits, for a program without tasks that keeps a socket non-blocking to bound each step of an exchange: call, and on wouldBlock Await err.want, and call again. It stops every task while it waits. Halts (AssertClosed) on a closed s, (AssertArgument) for any other want.
 
 ### Waits
 
@@ -310,6 +321,15 @@ PROCEDURE SetNonBlocking*(s: Socket; on: BOOLEAN; VAR err: Error): BOOLEAN;
 ```
 
 Sets (on) or clears O_NONBLOCK on s.
+
+#### ConnectWithin
+
+```oberon
+PROCEDURE ConnectWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    nonBlocking: BOOLEAN; VAR s: Socket; VAR err: Error): BOOLEAN;
+```
+
+A connection to host and port, as SocketTasks.Connect makes it but without tasks: each of host's addresses in getaddrinfo's order until one connects, reporting the last error, in at most ms milliseconds for them all (0: no limit), waiting in the kernel (Await). Resolving the name isn't counted in ms. s is non-blocking if nonBlocking, else blocking; on failure it is NIL, on success it has no deadline. Halts (AssertArgument) for a port outside 0..65535 or a negative ms.
 
 #### Adopt
 

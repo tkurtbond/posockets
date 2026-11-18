@@ -20,7 +20,7 @@ It is planned to offer:
 - errors from the network or the system returned as a result, never a
   halt.
 
-**Status: early.** Phases 1 to 6 and 8 of [PLAN.md](PLAN.md) are done:
+**Status: early.** Phases 1 to 6, 8, 9 and 10 of [PLAN.md](PLAN.md) are done:
 the build and tests, errors, addresses as text, resolving names, socket
 pairs, and blocking TCP over IPv4 and IPv6 (`Listen`, `Accept`,
 `Connect`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Close`), with
@@ -28,7 +28,8 @@ non-blocking sockets, and `SocketTasks`, which waits through poc's
 `Tasks` so one thread serves many connections, with deadlines on its
 waits, time limits on connecting, and a lingering close; and
 Unix-domain stream sockets (`ListenUnix`, `ConnectUnix`); and
-examples and a reference; on Linux, FreeBSD, OpenBSD and NetBSD.
+examples and a reference; and deadlines without tasks (`Await`,
+`ConnectWithin`), for a blocking program that bounds each wait; on Linux, FreeBSD, OpenBSD and NetBSD.
 Socket options wait for a program that needs them. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 

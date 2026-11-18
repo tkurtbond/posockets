@@ -76,7 +76,7 @@ LIBPATH := -library-path $(LIBDIR) -library-path $(PODATETIME)
 # The modules and their C parts, whichever have one.
 LIBSRC := $(LIBMODS:%=src/%.Mod) $(wildcard $(LIBMODS:%=src/%.c))
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestAddress TestBlocking TestErrors TestTasks TestDeadline TestUnix TestEcho TestNetcat TestForward TestFileServer
+TESTS := TestAddress TestBlocking TestErrors TestTasks TestDeadline TestAwait TestUnix TestEcho TestNetcat TestForward TestFileServer
 # tests that run tasks (VALGRIND_TASKS)
 TASKTESTS := TestTasks TestDeadline TestUnix TestEcho TestNetcat TestForward TestFileServer
 # Programs the tests start (test/<name>.Mod), not tests themselves.
@@ -86,7 +86,7 @@ HELPERS := BlockingPeer TooManyFiles
 # with status 10, so `make test` requires both.
 HALTTESTS := HaltClosed:80 HaltPort:84 HaltAddrs:84 HaltRange:81 HaltListening:85 \
   HaltAccept:85 HaltBacklog:84 HaltListeners:84 HaltShutdown:84 \
-  HaltBlocking:82 HaltWaiting:86 HaltDeadline:84 \
+  HaltBlocking:82 HaltWaiting:86 HaltDeadline:84 HaltAwait:84 \
   HaltPath:83 HaltEmptyPath:84
 ASSERTSTATUS := 10
 
