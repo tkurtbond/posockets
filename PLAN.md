@@ -871,19 +871,33 @@ Done 2026-11-15:
   the program ends. `TestTasks` calls `Tasks.WakeDescriptor`, which
   makes it, before counting descriptors, and `test/vg-fds.sh` allows
   the two that `TaskWaiting.-pipe` opened.
-- **memcheck can't check code running in a task.** poc's coroutine
-  stacks are `mmap`ed and not registered with valgrind
-  (`VALGRIND_STACK_REGISTER`), so memcheck reports thousands of
-  uninitialised values on them: 10,000,000 errors (its limit) for
-  `TestTasks`, and 23 for a throwaway program of two tasks that only
-  `Yield` (no posockets). `--max-stackframe` doesn't help. So tests in
-  `TASKTESTS` run under `valgrind --tool=none --track-fds=yes`, for
-  the descriptor check only. Registering the stacks belongs in
-  Peaseblossom's `Coroutines` (upstream; not done).
+- ~~**memcheck can't check code running in a task.**~~ (Superseded
+  2026-11-18; see below.) poc's coroutine stacks were `mmap`ed and not
+  registered with valgrind (`VALGRIND_STACK_REGISTER`), so memcheck
+  reported thousands of uninitialised values on them: 10,000,000
+  errors (its limit) for `TestTasks`, and 23 for a throwaway program of
+  two tasks that only `Yield` (no posockets). So tests in `TASKTESTS`
+  ran under `valgrind --tool=none --track-fds=yes`, for the descriptor
+  check only.
 - valgrind 3.27.1 counts each descriptor open at exit as an error for
   `--error-exitcode` (`TestTasks` exited 99 with only the self-pipe
-  open), so `VALGRIND_TASKS` doesn't use it; `vg-fds.sh` does the
-  check.
+  open); `vg-fds.sh` does the descriptor check.
+- **2026-11-18: full memcheck for the task tests.** Peaseblossom's bug
+  21 (the stacks registered) was fixed 2026-11-15, and memcheck now
+  follows poc's coroutines (found in pogeminilib, Phase 4). So
+  `TASKTESTS` and `VALGRIND_TASKS` are gone: every test runs under
+  memcheck, without `--error-exitcode`, and `test/vg-errors.sh` (from
+  pogeminilib) passes a log only if its error count equals its
+  descriptors open at exit. Every task test then has 2 errors, the
+  self-pipe. `TestFileServer` also had 22 `Value8` errors in
+  `GarbageCollectedHeap.DrainMarkStack`, from the collector's
+  conservative scan of task stacks: `--track-origins` put their
+  origins in stack allocations in `SocketTasks.Await` and
+  `TestFileServer.Whole`, words never written that happen to point at
+  a live block. Not posockets' bug, so `test/TestFileServer.supp`
+  suppresses them for that test alone; `poc-gc.supp` doesn't, since the
+  same report from a record copied whole into the heap is a real bug
+  (pogeminilib, Phase 2). `make valgrind` passes.
 - poc: a record field's type may refer forward only as `POINTER TO`
   the type (`target: POINTER TO Address`); a named pointer type
   declared later is rejected ("forward reference to a type is allowed

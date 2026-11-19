@@ -1,0 +1,22 @@
+# Valgrind suppressions for TestFileServer alone, besides poc-gc.supp.
+#
+# The collector scans each task's stack conservatively, as it does the
+# main stack (poc-gc.supp): every word goes to MarkCandidate, written or
+# not. A word never written in a frame of SocketTasks.Await or of the
+# test's Whole can still hold a stale pointer into a live block, which
+# MarkCandidate then marks and pushes; DrainMarkStack, tracing that
+# block, uses the address derived from the unwritten word, and memcheck
+# reports it there: 22 "Use of uninitialised value of size 8", the
+# same on every run, each "created by a stack allocation" in one of
+# those two procedures (--track-origins, 2026-11-18). That is the
+# conservative scan, not posockets.
+#
+# It is kept out of poc-gc.supp, which every test uses, because the same
+# report also comes from a record copied whole into the heap, carrying
+# its uninitialised padding, which is the program's to fix (pogeminilib's
+# PLAN.md, Phase 2).
+{
+   poc-gc-drainmarkstack-value8
+   Memcheck:Value8
+   fun:GarbageCollectedHeap.DrainMarkStack
+}

@@ -22,13 +22,12 @@ Two things about Tasks itself, not posockets, that a program using this module w
   --track-fds=yes), sees two it never opened. Tasks.WakeDescriptor()
   opens them at once, so a count taken after it includes them.
 
-- valgrind's memcheck can't follow poc's coroutines (poc 0.12.0):
-  their stacks aren't registered with valgrind, so it warns "client
-  switching stacks?" and reports thousands of uninitialised values
-  that aren't the program's. Run a program with tasks under
-  valgrind --tool=none --track-fds=yes to check descriptors only.
-  The fix (VALGRIND_STACK_REGISTER in poc's Coroutines) is noted in
-  Peaseblossom's PLAN.md, "Ongoing bug fixing", 21.
+- valgrind 3.27.1 counts each descriptor open at exit as an error
+  under --track-fds=yes, so the self-pipe alone fails
+  --error-exitcode; compare the errors with the descriptors instead
+  (test/vg-errors.sh). memcheck follows poc's coroutines since
+  Peaseblossom's bug 21 was fixed (2026-11-15), so a program with
+  tasks gets the full check.
 
 ## Procedures
 

@@ -53,13 +53,14 @@ program using it needs no extra flags.
 Two things a program using `SocketTasks` meets that come from poc's
 `Tasks`, not from posockets:
 
-- valgrind's memcheck can't follow poc's coroutines (as of poc 0.12.0)
-  and reports thousands of errors that aren't the program's. Use
-  `valgrind --tool=none --track-fds=yes` to check for descriptors left
-  open.
 - `Tasks` keeps two descriptors of its own (a self-pipe) open until the
   program ends, so a check for leaked descriptors should allow for
   them.
+- valgrind 3.27.1 counts each descriptor open at exit as an error
+  under `--track-fds=yes`, so the self-pipe alone fails
+  `--error-exitcode`; `test/vg-errors.sh` compares the errors with the
+  descriptors instead. memcheck itself follows poc's coroutines (since
+  Peaseblossom's bug 21 was fixed, 2026-11-15).
 
 ## Unix-domain sockets
 

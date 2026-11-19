@@ -30,15 +30,13 @@ MODELS := OC
 VARIANTS := $(MODELS) $(addsuffix -g,$(MODELS))
 # --track-fds=yes makes valgrind list the descriptors open at exit; the
 # valgrind target requires that the test opened none of them.
-VALGRIND ?= valgrind --leak-check=full --show-leak-kinds=all --track-fds=yes --error-exitcode=99 --suppressions=poc-gc.supp
-# memcheck can't follow poc's coroutines: their stacks are mmap'ed and not
-# registered with valgrind (VALGRIND_STACK_REGISTER), so code running on
-# them gives thousands of false "uninitialised" errors; a program of two
-# tasks and nothing else gives 23 (checked 2026-11-15, poc 0.12.0). The
-# tests in TASKTESTS run with no memory check, only the descriptor check,
-# by vg-fds.sh: no --error-exitcode, since valgrind 3.27.1 counts every
-# descriptor open at exit as an error, Tasks' self-pipe included.
-VALGRIND_TASKS ?= valgrind --tool=none --track-fds=yes
+# No --error-exitcode: valgrind 3.27.1 counts every descriptor open at
+# exit as an error, Tasks' self-pipe included, so test/vg-errors.sh
+# judges the errors instead. memcheck follows poc's coroutines since poc
+# registers their stacks with valgrind (Peaseblossom's PLAN.md, bug 21),
+# so a test with tasks gets the same checks as the rest. A test with
+# suppressions of its own has them in test/<name>.supp.
+VALGRIND ?= valgrind --leak-check=full --show-leak-kinds=all --track-fds=yes --suppressions=poc-gc.supp
 
 # An installed library on POC_LIBRARY_PATH would be taken in place of this
 # checkout's source, or would stop the build if another poc wrote it.
@@ -77,8 +75,6 @@ LIBPATH := -library-path $(LIBDIR) -library-path $(PODATETIME)
 LIBSRC := $(LIBMODS:%=src/%.Mod) $(wildcard $(LIBMODS:%=src/%.c))
 # Test programs (test/<name>.Mod, each a main module).
 TESTS := TestAddress TestBlocking TestErrors TestTasks TestDeadline TestAwait TestUnix TestEcho TestNetcat TestForward TestFileServer
-# tests that run tasks (VALGRIND_TASKS)
-TASKTESTS := TestTasks TestDeadline TestUnix TestEcho TestNetcat TestForward TestFileServer
 # Programs the tests start (test/<name>.Mod), not tests themselves.
 HELPERS := BlockingPeer TooManyFiles
 # Programs that must halt (test/<name>.Mod), as name:Assert-code. poc's
@@ -158,24 +154,20 @@ test: tests
 	  else echo "FAIL - $$e: exit $$got, output:"; diff examples/$$e.expected $(BUILD)/$$e.out; status=1; fi; \
 	done; exit $$status
 
-# Each test under valgrind. Besides definite and indirect leaks, every
+# Each test under valgrind. Besides definite and indirect leaks, the
+# only errors may be descriptors open at exit (test/vg-errors.sh); every
 # still-reachable block must be the collector's own (test/vg-reachable.sh),
-# and every descriptor open at exit must be one the test inherited
-# (test/vg-fds.sh, from valgrind's --track-fds=yes report). A test in
-# TASKTESTS gets the descriptor check only (VALGRIND_TASKS).
+# and every descriptor open at exit must be one the test inherited or
+# Tasks' self-pipe (test/vg-fds.sh, from valgrind's --track-fds=yes
+# report).
 valgrind: tests
 	@status=0; for t in $(TESTS); do \
-	  case " $(TASKTESTS) " in \
-	  *" $$t "*) \
-	    echo "== valgrind $$t (descriptors only: memcheck can't follow poc's coroutines)"; \
-	    (cd test && $(VALGRIND_TASKS) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t < /dev/null) || status=1; \
-	    grep -E 'FILE DESCRIPTORS' $(BUILD)/$$t.vg;; \
-	  *) \
-	    echo "== valgrind $$t"; \
-	    (cd test && $(VALGRIND) --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t < /dev/null) || status=1; \
-	    grep -E 'ERROR SUMMARY|lost:|reachable:|FILE DESCRIPTORS' $(BUILD)/$$t.vg; \
-	    test/vg-reachable.sh $(BUILD)/$$t.vg || { echo "FAIL - $$t: still-reachable memory the collector did not allocate"; status=1; };; \
-	  esac; \
+	  echo "== valgrind $$t"; \
+	  supp=; if [ -f test/$$t.supp ]; then supp=--suppressions=$$t.supp; fi; \
+	  (cd test && $(VALGRIND) $$supp --log-file=../$(BUILD)/$$t.vg ../$(BUILD)/$$t < /dev/null) || status=1; \
+	  grep -E 'ERROR SUMMARY|lost:|reachable:|FILE DESCRIPTORS' $(BUILD)/$$t.vg; \
+	  test/vg-errors.sh $(BUILD)/$$t.vg || { echo "FAIL - $$t: memory errors (see $(BUILD)/$$t.vg)"; status=1; }; \
+	  test/vg-reachable.sh $(BUILD)/$$t.vg || { echo "FAIL - $$t: still-reachable memory the collector did not allocate"; status=1; }; \
 	  test/vg-fds.sh $(BUILD)/$$t.vg || { echo "FAIL - $$t: descriptors left open at exit (see $(BUILD)/$$t.vg)"; status=1; }; \
 	done; exit $$status
 

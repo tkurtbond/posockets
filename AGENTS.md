@@ -128,10 +128,13 @@ descriptor open (more open at exit than it inherited, less the two of
 Tasks' self-pipe, which it allows). A test may also check its own count
 with `TestHelp.OpenFds` (`fcntl(F_GETFD)` on each descriptor below the
 limit; the BSDs have no usable `/proc/self/fd`); one using tasks calls `Tasks.WakeDescriptor`
-first, so the self-pipe is already counted. Tests that run tasks are
-listed in `TASKTESTS` as well as `TESTS`: memcheck can't follow poc's
-coroutines, so `make valgrind` runs those under `--tool=none` for the
-descriptor check only.
+first, so the self-pipe is already counted. Every test, tasks or not,
+runs under full memcheck, without `--error-exitcode` (valgrind counts
+the self-pipe's descriptors as errors): `test/vg-errors.sh` passes a
+log only if its errors are all descriptors. A test whose log needs a
+suppression of its own has it in `test/<name>.supp`
+(`TestFileServer.supp`: the collector's conservative scan of task
+stacks).
 
 ## Testing on the BSD hosts
 
@@ -264,15 +267,19 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
 - **`Platform.System` returns the wait status**: 0 when the command
   exits 0, otherwise its exit code × 256.
 
-- **memcheck can't follow poc's coroutines.** Their stacks are
-  `mmap`ed and not registered with valgrind, so it warns "client
-  switching stacks?" and reports uninitialised values: 23 errors for a
-  program of two tasks that only `Yield`, 10,000,000 for `TestTasks`.
-  `--max-stackframe` doesn't help. Hence `TASKTESTS` and
-  `VALGRIND_TASKS` (`--tool=none --track-fds=yes`).
+- **memcheck follows poc's coroutines** since Peaseblossom's bug 21
+  was fixed (2026-11-15), so the task tests get full memcheck (PLAN.md,
+  2026-11-18). Before it, it reported millions of uninitialised values
+  on their stacks, and they ran under `--tool=none`.
 - **valgrind 3.27.1 counts each descriptor open at exit as an error**
-  for `--error-exitcode`, with `--track-fds=yes`; so `VALGRIND_TASKS`
-  doesn't use it.
+  for `--error-exitcode`, with `--track-fds=yes`; so `make valgrind`
+  doesn't use it, and `test/vg-errors.sh` requires the errors to be
+  exactly the descriptors.
+- **The collector's conservative scan of a task's stack can make
+  memcheck report `Value8` in `DrainMarkStack`**, when a word never
+  written happens to point at a live block (`TestFileServer`, 22 of
+  them). It goes in that test's own `.supp`, not `poc-gc.supp`: the
+  same report from a record copied whole into the heap is a real bug.
 - **Tasks keeps a self-pipe**: two descriptors, opened in
   `TaskWaiting.-pipe` the first time the program waits idle, or by
   `Tasks.WakeDescriptor()` (in poc 0.12.0), and never closed.
