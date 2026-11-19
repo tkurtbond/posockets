@@ -97,6 +97,10 @@ TYPE
     port-: INTEGER
   END;
 
+  (* A lookup's addresses, all of them (ResolveAll), in an array made to
+     hold them: LEN is how many, at least one. *)
+  Addresses* = POINTER TO ARRAY OF Address;
+
   (* What went wrong: kind, and for a system or name error the code and a
      text saying what was being done ("resolve example.invalid port 80:
      Name or service not known"), truncated, never overflowed. *)
@@ -137,11 +141,11 @@ PROCEDURE ["C", "Sockets.-sock-address"] CSockAddress(fd: SYSTEM.INT64;
   VAR port: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-pair"] CPair(VAR fds: ARRAY OF SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-close"] CClose(fd: SYSTEM.INT64): SYSTEM.INT32;
-PROCEDURE ["C", "Sockets.-resolve"] CResolve(host: ARRAY OF CHAR;
-  hostLen: SYSTEM.INT64; port, passive: SYSTEM.INT32;
-  VAR families: ARRAY OF SYSTEM.INT32; VAR hosts: ARRAY OF CHAR;
-  stride: SYSTEM.INT64; VAR ports: ARRAY OF SYSTEM.INT32;
-  max: SYSTEM.INT32; VAR count, code: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-resolve-now"] CResolveNow(host: ARRAY OF CHAR;
+  hostLen: SYSTEM.INT64; port: SYSTEM.INT32;
+  VAR h: SYSTEM.ADDRESS): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-resolve-count"] CResolveCount(h: SYSTEM.ADDRESS;
+  VAR count, code: SYSTEM.INT32): SYSTEM.INT32;
 PROCEDURE ["C", "Sockets.-resolve-start"] CResolveStart(host: ARRAY OF CHAR;
   hostLen: SYSTEM.INT64; port: SYSTEM.INT32; VAR h: SYSTEM.ADDRESS;
   VAR fd: SYSTEM.INT64): SYSTEM.INT32;
@@ -246,29 +250,17 @@ BEGIN
   Append(what, " port "); AppendInt(what, port)
 END ResolveWhat;
 
-(* A lookup's result from the C part, kind and code, as addrs[0..n-1]
-   from its arrays, or err. Halts (AssertArgument) if addrs was too
-   small for count. *)
-PROCEDURE Resolved(kind, code: SYSTEM.INT32; what: ARRAY OF CHAR;
-    VAR families: ARRAY OF SYSTEM.INT32; VAR hosts: ARRAY OF CHAR;
-    VAR ports: ARRAY OF SYSTEM.INT32; count: SYSTEM.INT32;
-    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
-  VAR i, j: LONGINT;
+(* all, as Resolve and FinishResolve give addresses, into addrs[0..n-1].
+   Halts (AssertArgument) if addrs can't hold them all. *)
+PROCEDURE Fit(all: Addresses; VAR addrs: ARRAY OF Address;
+    VAR n: INTEGER): BOOLEAN;
+  VAR i: LONGINT;
 BEGIN
-  n := 0;
-  IF kind # 0 THEN SetError(err, kind, code, what); RETURN FALSE END;
-  ASSERT(count <= LEN(addrs), AssertArgument);
-  FOR i := 0 TO count - 1 DO
-    addrs[i].family := families[i]; addrs[i].port := ports[i];
-    j := 0;
-    WHILE (j < HostLen - 1) & (hosts[i * HostLen + j] # 0X) DO
-      addrs[i].host[j] := hosts[i * HostLen + j]; INC(j)
-    END;
-    addrs[i].host[j] := 0X
-  END;
-  n := count;
+  ASSERT(LEN(all^) <= LEN(addrs), AssertArgument);
+  FOR i := 0 TO LEN(all^) - 1 DO addrs[i] := all[i] END;
+  n := SHORT(LEN(all^));
   RETURN TRUE
-END Resolved;
+END Fit;
 
 (* Sockets *)
 
@@ -384,30 +376,6 @@ END PeerAddress;
 
 (* Names *)
 
-(* host's addresses for a TCP connection to port, as getaddrinfo gives
-   them, in its order, into addrs[0..n-1]. A numeric host never consults
-   a name server; a name may, and blocks every task meanwhile. An empty
-   host gives the loopback addresses. A name that doesn't resolve is a
-   name error. Halts (AssertArgument) for a port outside 0..65535, or if
-   addrs can't hold every address. *)
-PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER;
-    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
-  VAR
-    families, ports: POINTER TO ARRAY OF SYSTEM.INT32;
-    hosts: POINTER TO ARRAY OF CHAR;
-    count, code, kind: SYSTEM.INT32;
-    what: ARRAY 512 OF CHAR;
-BEGIN
-  CheckPort(port);
-  ClearError(err); n := 0;
-  NEW(families, LEN(addrs)); NEW(ports, LEN(addrs));
-  NEW(hosts, LEN(addrs) * HostLen);
-  kind := CResolve(host, LEN(host), port, 0, families^, hosts^, HostLen,
-    ports^, SHORT(LEN(addrs)), count, code);
-  ResolveWhat(host, port, what);
-  RETURN Resolved(kind, code, what, families^, hosts^, ports^, count,
-    addrs, n, err)
-END Resolve;
 
 PROCEDURE ^ FinalizeResolution(obj: SYSTEM.PTR);
 
@@ -446,30 +414,81 @@ BEGIN
   RETURN TRUE
 END StartResolve;
 
-(* r's addresses into addrs[0..n-1], or its error, as Resolve gives
-   them, once r is done (r.fd readable, or -1), freeing r; before then
-   FALSE with wouldBlock (want wantRead), keeping it. Halts
-   (AssertResolution) for an r already finished or abandoned,
-   (AssertArgument) if addrs can't hold every address (r is freed
-   first). *)
-PROCEDURE FinishResolve*(r: Resolution; VAR addrs: ARRAY OF Address;
-    VAR n: INTEGER; VAR err: Error): BOOLEAN;
+(* r's addresses, all of them, as ResolveAll gives them, or its error,
+   once r is done (r.fd readable, or -1), freeing r; before then FALSE
+   with wouldBlock (want wantRead), keeping it. Halts (AssertResolution)
+   for an r already finished or abandoned. *)
+PROCEDURE FinishResolveAll*(r: Resolution; VAR addrs: Addresses;
+    VAR err: Error): BOOLEAN;
   VAR
     families, ports: POINTER TO ARRAY OF SYSTEM.INT32;
     hosts: POINTER TO ARRAY OF CHAR;
-    count, code, kind: SYSTEM.INT32;
+    count, max, code, kind: SYSTEM.INT32;
+    i, j: LONGINT;
 BEGIN
   ASSERT(r.h # 0, AssertResolution);
-  ClearError(err); n := 0;
-  NEW(families, LEN(addrs)); NEW(ports, LEN(addrs));
-  NEW(hosts, LEN(addrs) * HostLen);
-  kind := CResolveFinish(r.h, families^, hosts^, HostLen, ports^,
-    SHORT(LEN(addrs)), count, code);
+  ClearError(err); addrs := NIL;
+  (* Counted first, so the arrays fit however many a name has. *)
+  kind := CResolveCount(r.h, count, code);
   IF kind = WouldBlock THEN SetWouldBlock(err, wantRead); RETURN FALSE END;
+  max := count; IF max < 1 THEN max := 1 END;  (* none: an error *)
+  NEW(families, max); NEW(ports, max); NEW(hosts, max * HostLen);
+  kind := CResolveFinish(r.h, families^, hosts^, HostLen, ports^, max,
+    count, code);
   r.h := 0; r.fd := -1;
-  RETURN Resolved(kind, code, r.what, families^, hosts^, ports^, count,
-    addrs, n, err)
+  IF kind # 0 THEN SetError(err, kind, code, r.what); RETURN FALSE END;
+  NEW(addrs, count);
+  FOR i := 0 TO count - 1 DO
+    addrs[i].family := families[i]; addrs[i].port := ports[i];
+    j := 0;
+    WHILE (j < HostLen - 1) & (hosts[i * HostLen + j] # 0X) DO
+      addrs[i].host[j] := hosts[i * HostLen + j]; INC(j)
+    END;
+    addrs[i].host[j] := 0X
+  END;
+  RETURN TRUE
+END FinishResolveAll;
+
+(* r's addresses into addrs[0..n-1], or its error, as FinishResolveAll
+   gives them. Halts as FinishResolveAll, and (AssertArgument) if addrs
+   can't hold every address (r is freed first). *)
+PROCEDURE FinishResolve*(r: Resolution; VAR addrs: ARRAY OF Address;
+    VAR n: INTEGER; VAR err: Error): BOOLEAN;
+  VAR all: Addresses;
+BEGIN
+  n := 0;
+  RETURN FinishResolveAll(r, all, err) & Fit(all, addrs, n)
 END FinishResolve;
+
+(* host's addresses for a TCP connection to port, as getaddrinfo gives
+   them, in its order: all of them, in an array made to hold them (its
+   LEN is how many). A numeric host never consults a name server; a
+   name may, and blocks every task meanwhile. An empty host gives the
+   loopback addresses. A name that doesn't resolve, or has no TCP
+   address, is a name error. Halts (AssertArgument) for a port outside
+   0..65535. *)
+PROCEDURE ResolveAll*(host: ARRAY OF CHAR; port: INTEGER;
+    VAR addrs: Addresses; VAR err: Error): BOOLEAN;
+  VAR h: SYSTEM.ADDRESS; e: SYSTEM.INT32; what: ARRAY 512 OF CHAR;
+BEGIN
+  CheckPort(port);
+  ClearError(err); addrs := NIL;
+  ResolveWhat(host, port, what);
+  e := CResolveNow(host, LEN(host), port, h);
+  IF e # 0 THEN SetError(err, system, e, what); RETURN FALSE END;
+  RETURN FinishResolveAll(NewResolution(h, -1, what), addrs, err)
+END ResolveAll;
+
+(* host's addresses, as ResolveAll gives them, into addrs[0..n-1].
+   Halts (AssertArgument) for a port outside 0..65535, or if addrs
+   can't hold every address: ResolveAll never does. *)
+PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER;
+    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
+  VAR all: Addresses;
+BEGIN
+  n := 0;
+  RETURN ResolveAll(host, port, all, err) & Fit(all, addrs, n)
+END Resolve;
 
 (* Gives up r: frees it now if its lookup is done, or has its thread
    free it when it is (it can't be stopped sooner). r.fd is closed then,
@@ -863,20 +882,19 @@ BEGIN
   RETURN TRUE
 END SetNonBlocking;
 
-(* host's TCP addresses for port, as Resolve gives them, waiting in the
-   kernel at most ms milliseconds (0: no limit) for a name's lookup
+(* host's TCP addresses for port, as ResolveAll gives them, waiting in
+   the kernel at most ms milliseconds (0: no limit) for a name's lookup
    (StartResolve), which goes on in its thread after a timeout, and is
    freed when done: then FALSE with timedOut, "resolve <host> port
-   <port>: timed out". It stops every task while it waits, as Resolve
-   does, but no longer than ms. Halts (AssertArgument) for a port
-   outside 0..65535, a negative ms, or if addrs can't hold every
-   address. *)
-PROCEDURE ResolveWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
-    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
+   <port>: timed out". It stops every task while it waits, as
+   ResolveAll does, but no longer than ms. Halts (AssertArgument) for a
+   port outside 0..65535 or a negative ms. *)
+PROCEDURE ResolveAllWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: Addresses; VAR err: Error): BOOLEAN;
   VAR r: Resolution; end, left: LONGINT; e: SYSTEM.INT32;
 BEGIN
   ASSERT(ms >= 0, AssertArgument);
-  n := 0;
+  addrs := NIL;
   IF ~StartResolve(host, port, r, err) THEN RETURN FALSE END;
   end := Now() + ms;
   WHILE r.fd # -1 DO
@@ -885,7 +903,7 @@ BEGIN
     END;
     e := CAwait(r.fd, wantRead, left);
     IF e = 0 THEN
-      IF FinishResolve(r, addrs, n, err) THEN RETURN TRUE
+      IF FinishResolveAll(r, addrs, err) THEN RETURN TRUE
       ELSIF err.kind # wouldBlock THEN RETURN FALSE
       END
     ELSIF e = TimedOutMark THEN
@@ -897,26 +915,37 @@ BEGIN
       AbandonResolve(r); SetError(err, system, e, "poll"); RETURN FALSE
     END
   END;
-  RETURN FinishResolve(r, addrs, n, err)
+  RETURN FinishResolveAll(r, addrs, err)
+END ResolveAllWithin;
+
+(* host's TCP addresses for port, as ResolveAllWithin gives them, into
+   addrs[0..n-1]. Halts (AssertArgument) for a port outside 0..65535, a
+   negative ms, or if addrs can't hold every address. *)
+PROCEDURE ResolveWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
+  VAR all: Addresses;
+BEGIN
+  n := 0;
+  RETURN ResolveAllWithin(host, port, ms, all, err) & Fit(all, addrs, n)
 END ResolveWithin;
 
 (* A connection to host and port, as SocketTasks.Connect makes it but
    without tasks: each of host's addresses in getaddrinfo's order until
    one connects, reporting the last error, in at most ms milliseconds
-   for them all, the lookup included (ResolveWithin; 0: no limit),
+   for them all, the lookup included (ResolveAllWithin; 0: no limit),
    waiting in the kernel (Await). s is non-blocking if nonBlocking, else
    blocking; on failure it is NIL, on success it has no deadline. Halts
    (AssertArgument) for a port outside 0..65535 or a negative ms. *)
 PROCEDURE ConnectWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
     nonBlocking: BOOLEAN; VAR s: Socket; VAR err: Error): BOOLEAN;
-  VAR addrs: ARRAY 16 OF Address; n, i: INTEGER; end, left: LONGINT;
+  VAR addrs: Addresses; n, i: LONGINT; end, left: LONGINT;
     ok: BOOLEAN;
 BEGIN
   ASSERT(ms >= 0, AssertArgument);
   s := NIL;
   end := Now() + ms; left := 0; ok := FALSE;
-  IF ~ResolveWithin(host, port, ms, addrs, n, err) THEN RETURN FALSE END;
-  i := 0;
+  IF ~ResolveAllWithin(host, port, ms, addrs, err) THEN RETURN FALSE END;
+  n := LEN(addrs^); i := 0;
   WHILE ~ok & (i < n) DO
     IF ms > 0 THEN
       (* Out of time: the next address still gets 1 ms, so a connection

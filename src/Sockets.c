@@ -295,57 +295,56 @@ static void describe(const char *verb, const struct sockaddr *sa,
 		 (int)port);
 }
 
+/* Set by the tests alone (TestHelp): each lookup's addresses are given
+   this many times over, so a test has a host with more addresses than a
+   caller's array holds, with no name server; 0 or 1 for once. */
+static int resolve_copies;
+
+void set_resolve_copies(int32_t n) NAME("set-resolve-copies");
+void set_resolve_copies(int32_t n)
+{
+	resolve_copies = n;
+}
+
 /* Writes res's TCP addresses (inet and inet6 only) as family, numeric
-   host text and port: hosts is max rows of stride bytes each. *count
-   receives how many there are, which may be more than max (Oberon
-   halts then). Returns 0, or KIND_SYSTEM with *code. */
+   host text and port: hosts is max rows of stride bytes each (max may
+   be 0, to count them only). *count receives how many there are, which
+   may be more than max. Returns 0; KIND_NAME with EAI_NONAME if there
+   are none, since a host with no TCP address is no use to a caller
+   (and Oberon can't allocate an empty array); or KIND_SYSTEM with
+   *code. */
 static int32_t addresses(const struct addrinfo *res, int32_t *families,
 			 address hosts, length stride, int32_t *ports,
 			 int32_t max, int32_t *count, int32_t *code)
 {
 	const struct addrinfo *ai;
-	int i = 0;
+	int i = 0, c, copies = resolve_copies > 1 ? resolve_copies : 1;
 
-	for (ai = res; ai != NULL; ai = ai->ai_next) {
-		if (!inet_family(ai))
-			continue;
-		if (i < max) {
-			int e = from_sockaddr(ai->ai_addr, ai->ai_addrlen,
-					      &families[i],
-					      (char *)hosts + i * stride,
-					      (size_t)stride, &ports[i]);
-			if (e != 0) {
-				*code = e;
-				return KIND_SYSTEM;
+	*count = 0;
+	for (c = 0; c < copies; c++)
+		for (ai = res; ai != NULL; ai = ai->ai_next) {
+			if (!inet_family(ai))
+				continue;
+			if (i < max) {
+				int e = from_sockaddr(ai->ai_addr,
+						      ai->ai_addrlen,
+						      &families[i],
+						      (char *)hosts + i * stride,
+						      (size_t)stride,
+						      &ports[i]);
+				if (e != 0) {
+					*code = e;
+					return KIND_SYSTEM;
+				}
 			}
+			i++;
 		}
-		i++;
+	if (i == 0) {
+		*code = EAI_NONAME;
+		return KIND_NAME;
 	}
 	*count = i;
 	return 0;
-}
-
-/* Resolve: getaddrinfo's TCP addresses for host and port, as addresses
-   writes them. Returns 0, or the kind with *code. */
-int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
-		int32_t *families, address hosts, length stride,
-		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
-	NAME("resolve");
-int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
-		int32_t *families, address hosts, length stride,
-		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
-{
-	struct addrinfo *res;
-	int32_t kind;
-
-	*count = 0;
-	kind = lookup(host, hostlen, port, passive, &res, code);
-	if (kind != 0)
-		return kind;
-	kind = addresses(res, families, hosts, stride, ports, max, count,
-			 code);
-	freeaddrinfo(res);
-	return kind;
 }
 
 /* A lookup in a thread of its own (PLAN.md, Phase 11), for StartResolve,
@@ -524,7 +523,59 @@ int32_t resolve_start(address host, length hostlen, int32_t port,
 	return 0;
 }
 
-/* FinishResolve: once done, writes the addresses as resolve does and
+/* ResolveAll: looks host and port up now, in this thread, into a
+   request already done (no pipe, no thread), for resolve_count and
+   resolve_finish, in *handle. Returns 0, or ENOMEM. */
+int32_t resolve_now(address host, length hostlen, int32_t port,
+		    address *handle) NAME("resolve-now");
+int32_t resolve_now(address host, length hostlen, int32_t port,
+		    address *handle)
+{
+	struct resolution *q;
+
+	*handle = 0;
+	q = calloc(1, sizeof *q);
+	if (q == NULL)
+		return ENOMEM;
+	if (pthread_mutex_init(&q->lock, NULL) != 0) {
+		free(q);
+		return ENOMEM;
+	}
+	q->rfd = q->wfd = -1;
+	q->port = port;
+	q->kind = lookup(host, hostlen, port, 0, &q->res, &q->code);
+	q->done = 1;
+	*handle = (address)q;
+	return 0;
+}
+
+/* How many addresses a request has, into *count, once it is done,
+   keeping it, so the caller can allocate for them all before
+   resolve_finish: 0, or the kind with *code (the request's error,
+   which resolve_finish reports again). Before it is done, returns
+   WOULD_BLOCK. */
+int32_t resolve_count(address handle, int32_t *count, int32_t *code)
+	NAME("resolve-count");
+int32_t resolve_count(address handle, int32_t *count, int32_t *code)
+{
+	struct resolution *q = (struct resolution *)handle;
+	int done;
+
+	*count = 0;
+	*code = 0;
+	pthread_mutex_lock(&q->lock);
+	done = q->done;
+	pthread_mutex_unlock(&q->lock);
+	if (!done)
+		return WOULD_BLOCK;
+	if (q->kind != 0) {
+		*code = q->code;
+		return q->kind;
+	}
+	return addresses(q->res, NULL, 0, 0, NULL, 0, count, code);
+}
+
+/* FinishResolve: once done, writes the addresses as addresses does and
    frees the request, returning 0 or the kind with *code. Before it is
    done, returns WOULD_BLOCK and keeps it. */
 int32_t resolve_finish(address handle, int32_t *families, address hosts,

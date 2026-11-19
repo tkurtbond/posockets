@@ -55,7 +55,12 @@ without stopping other tasks (Phase 11): `Sockets.StartResolve`,
 `SocketTasks.Resolve`, a `getaddrinfo` in a detached C thread per
 lookup, signalled through a pipe; `SocketTasks.Connect` and
 `Sockets.ConnectWithin` count the lookup in their time limit
-(`TestResolve`, `HaltResolution`).
+(`TestResolve`, `HaltResolution`). Since 2026-11-19 too, every lookup
+has a form that allocates for all of a name's addresses
+(`Sockets.ResolveAll`, `ResolveAllWithin`, `FinishResolveAll`,
+`SocketTasks.ResolveAll`, giving `Sockets.Addresses`), and `Connect`
+and `ConnectWithin` use them, so no count of addresses halts them
+(PLAN.md, "Every address: lookups that allocate").
 
 **poc 0.13.0 or later** (`Tasks.AwaitReadableFor`), **and poDateTime
 built by the same poc.** This machine (atla) and the BSD hosts have

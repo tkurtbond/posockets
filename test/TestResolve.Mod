@@ -8,7 +8,11 @@ MODULE TestResolve; (* names looked up while other tasks run *)
    thread. A ticker task shows that other tasks run while a lookup
    waits. The only name is localhost, from /etc/hosts, and
    nonexistent.invalid, which no name server knows; a lookup slow enough
-   to time out comes from TestHelp.SetResolveDelay. Every abandoned
+   to time out comes from TestHelp.SetResolveDelay. The allocating
+   forms (ResolveAll, ResolveAllWithin, FinishResolveAll and
+   SocketTasks.ResolveAll) are given more addresses than any fixed
+   array here holds by TestHelp.SetResolveCopies, as are Connect and
+   ConnectWithin, which once halted on more than 16. Every abandoned
    lookup's thread is waited for, so descriptors are back to their count
    and nothing is left unfreed at exit. *)
 
@@ -28,6 +32,8 @@ VAR
   ticks: LONGINT;
   stop: BOOLEAN;
   r: Sockets.Resolution;
+  all: Sockets.Addresses;
+  k: LONGINT;
   addrs: ARRAY 16 OF Sockets.Address;
   ls: ARRAY 2 OF Sockets.Socket;
   c: Sockets.Socket;
@@ -70,6 +76,19 @@ BEGIN
   END;
   RETURN TRUE
 END Loopback;
+
+(* Whether all holds count loopback addresses, all with port *)
+PROCEDURE AllLoopback(all: Sockets.Addresses; count: LONGINT; port: INTEGER): BOOLEAN;
+  VAR i: LONGINT;
+BEGIN
+  IF (all = NIL) OR (LEN(all^) # count) THEN RETURN FALSE END;
+  FOR i := 0 TO count - 1 DO
+    IF ~((all[i].host = "127.0.0.1") OR (all[i].host = "::1"))
+      OR (all[i].port # port) THEN RETURN FALSE
+    END
+  END;
+  RETURN TRUE
+END AllLoopback;
 
 (* Waits long enough for every slow lookup's thread to be done *)
 PROCEDURE Settle;
@@ -183,6 +202,51 @@ BEGIN
   Settle;
   Check.Check(TestHelp.OpenFds() = fds0,
     "every abandoned lookup's thread done: descriptors back to their count");
+
+  (* Every address, however many: more than any array here holds *)
+  ok := Sockets.ResolveAll("localhost", 80, all, err);
+  Check.Check(ok & (all # NIL) & AllLoopback(all, LEN(all^), 80),
+    "ResolveAll localhost: the loopback addresses, in an array of their own");
+  k := 0; IF all # NIL THEN k := LEN(all^) END;
+  TestHelp.SetResolveCopies(40);
+  ok := Sockets.ResolveAll("127.0.0.1", 80, all, err);
+  Check.Check(ok & AllLoopback(all, 40, 80), "ResolveAll 127.0.0.1 given 40 times: all 40");
+  ok := Sockets.ResolveAll("localhost", 80, all, err);
+  Check.Check(ok & AllLoopback(all, 40 * k, 80), "ResolveAll localhost given 40 times: all of them");
+  ok := Sockets.ResolveAllWithin("localhost", 80, 2000, all, err);
+  Check.Check(ok & AllLoopback(all, 40 * k, 80), "ResolveAllWithin localhost given 40 times: all of them");
+  ok := SocketTasks.ResolveAll("localhost", 80, 2000, all, err);
+  Check.Check(ok & AllLoopback(all, 40 * k, 80), "SocketTasks.ResolveAll localhost given 40 times: all of them");
+  ok := Sockets.StartResolve("localhost", 80, r, err);
+  IF ok & (r.fd >= 0) THEN Tasks.AwaitReadable(r.fd) END;
+  ok := ok & Sockets.FinishResolveAll(r, all, err);
+  Check.Check(ok & AllLoopback(all, 40 * k, 80) & (r.fd = -1),
+    "FinishResolveAll localhost given 40 times: all of them, r finished");
+  ok := Sockets.StartResolve("localhost", 80, r, err);
+  ok := ok & Sockets.FinishResolveAll(r, all, err);
+  IF ~ok & (err.kind = Sockets.wouldBlock) THEN
+    Check.Check((all = NIL) & (r.fd >= 0), "FinishResolveAll before it is done: wouldBlock, no addresses, r kept");
+    Sockets.AbandonResolve(r)
+  ELSE
+    Check.Check(ok, "FinishResolveAll before it is done: wouldBlock, no addresses, r kept (done already)")
+  END;
+  ok := Sockets.ResolveAll("nonexistent.invalid", 80, all, err);
+  Check.Check(~ok & (all = NIL) & (err.kind = Sockets.name)
+    & StartsWith(err.text, "resolve nonexistent.invalid port 80: "),
+    "ResolveAll nonexistent.invalid: a name error, no addresses");
+  ok := Sockets.Listen("127.0.0.1", 0, 4, FALSE, ls, nl, err)
+    & Sockets.LocalAddress(ls[0], addrs[0], err);
+  port := addrs[0].port;
+  ok := SocketTasks.Connect("127.0.0.1", port, 2000, c, err);
+  Check.Check(ok, "SocketTasks.Connect to a host with 40 addresses");
+  IF c # NIL THEN Sockets.Close(c) END;
+  ok := Sockets.ConnectWithin("127.0.0.1", port, 2000, FALSE, c, err);
+  Check.Check(ok, "Sockets.ConnectWithin to a host with 40 addresses");
+  IF c # NIL THEN Sockets.Close(c) END;
+  FOR i := 0 TO nl - 1 DO Sockets.Close(ls[i]) END;
+  TestHelp.SetResolveCopies(0);
+  Settle;
+  Check.Check(TestHelp.OpenFds() = fds0, "descriptors back to their count after the allocating lookups");
 
   stop := TRUE; Tasks.Join(ticker);
   Check.Summary

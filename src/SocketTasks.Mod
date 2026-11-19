@@ -132,25 +132,24 @@ BEGIN
   RETURN ok
 END Finish;
 
-(* host's TCP addresses for port, as Sockets.Resolve gives them, but
+(* host's TCP addresses for port, as Sockets.ResolveAll gives them, but
    with a name looked up in a thread of the C part (Sockets.StartResolve)
    while this task waits and others run, for at most ms milliseconds (0:
    no limit). Past ms, FALSE with timedOut, "resolve <host> port <port>:
    timed out"; the lookup goes on in its thread, and is freed when done.
-   Halts (Sockets.AssertArgument) for a port outside 0..65535, a
-   negative ms, or if addrs can't hold every address. *)
-PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
-    VAR addrs: ARRAY OF Sockets.Address; VAR n: INTEGER;
-    VAR err: Sockets.Error): BOOLEAN;
+   Halts (Sockets.AssertArgument) for a port outside 0..65535 or a
+   negative ms. *)
+PROCEDURE ResolveAll*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: Sockets.Addresses; VAR err: Sockets.Error): BOOLEAN;
   VAR r: Sockets.Resolution; end, left: LONGINT;
 BEGIN
   ASSERT(ms >= 0, Sockets.AssertArgument);
-  n := 0;
+  addrs := NIL;
   IF ~Sockets.StartResolve(host, port, r, err) THEN RETURN FALSE END;
   end := Sockets.Now() + ms;
   (* The thread writes its byte once, so one wake is the answer, but a
      wait may end early by Now (Tasks' timers count from its clock). *)
-  WHILE ~Sockets.FinishResolve(r, addrs, n, err) DO
+  WHILE ~Sockets.FinishResolveAll(r, addrs, err) DO
     IF err.kind # Sockets.wouldBlock THEN RETURN FALSE END;
     IF ms = 0 THEN Tasks.AwaitReadable(r.fd)
     ELSE
@@ -162,6 +161,22 @@ BEGIN
       END
     END
   END;
+  RETURN TRUE
+END ResolveAll;
+
+(* host's TCP addresses for port, as ResolveAll gives them, into
+   addrs[0..n-1]. Halts (Sockets.AssertArgument) for a port outside
+   0..65535, a negative ms, or if addrs can't hold every address. *)
+PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: ARRAY OF Sockets.Address; VAR n: INTEGER;
+    VAR err: Sockets.Error): BOOLEAN;
+  VAR all: Sockets.Addresses; i: LONGINT;
+BEGIN
+  n := 0;
+  IF ~ResolveAll(host, port, ms, all, err) THEN RETURN FALSE END;
+  ASSERT(LEN(all^) <= LEN(addrs), Sockets.AssertArgument);
+  FOR i := 0 TO LEN(all^) - 1 DO addrs[i] := all[i] END;
+  n := SHORT(LEN(all^));
   RETURN TRUE
 END Resolve;
 
@@ -182,21 +197,21 @@ END ConnectTo;
 (* A connection to host and port, as a non-blocking s: each of host's
    addresses in getaddrinfo's order until one connects, reporting the
    last error ("connect to 127.0.0.1 port 7: Connection refused"), in at
-   most ms milliseconds for them all, the lookup (Resolve) included (0:
+   most ms milliseconds for them all, the lookup (ResolveAll) included (0:
    no limit, as ConnectTo). A name that doesn't resolve gives its error
    ("resolve example.invalid port 80: ..."). Halts
    (Sockets.AssertArgument) for a port outside 0..65535 or a negative
    ms. *)
 PROCEDURE Connect*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
     VAR s: Sockets.Socket; VAR err: Sockets.Error): BOOLEAN;
-  VAR addrs: ARRAY 16 OF Sockets.Address; n, i: INTEGER; end, left: LONGINT;
+  VAR addrs: Sockets.Addresses; i: LONGINT; end, left: LONGINT;
 BEGIN
   ASSERT(ms >= 0, Sockets.AssertArgument);
   s := NIL;
   end := Sockets.Now() + ms; left := 0;
-  IF ~Resolve(host, port, ms, addrs, n, err) THEN RETURN FALSE END;
+  IF ~ResolveAll(host, port, ms, addrs, err) THEN RETURN FALSE END;
   i := 0;
-  WHILE i < n DO
+  WHILE i < LEN(addrs^) DO
     IF ms > 0 THEN
       (* Out of time: the next address still gets 1 ms, so a connection
          that can be made at once is, and the error names the address. *)

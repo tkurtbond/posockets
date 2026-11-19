@@ -33,7 +33,8 @@ examples and a reference; and deadlines without tasks (`Await`,
 `ConnectWithin`), for a blocking program that bounds each wait; and
 names resolved without stopping other tasks (`SocketTasks.Resolve`,
 `Sockets.ResolveWithin`, `StartResolve`), so a time limit on
-connecting counts the lookup too; on Linux, FreeBSD, OpenBSD and NetBSD.
+connecting counts the lookup too, each also as a form that allocates
+for every address a name has (`ResolveAll`); on Linux, FreeBSD, OpenBSD and NetBSD.
 Socket options wait for a program that needs them. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 

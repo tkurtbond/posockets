@@ -16,6 +16,7 @@ PROCEDURE ["C", "TestHelp.-close"] CClose(fd: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-unix-path-max"] CUnixPathMax(): SYSTEM.INT32;
 (* in Sockets.c, the library's C part, for the tests alone *)
 PROCEDURE ["C", "Sockets.-set-resolve-delay"] CSetResolveDelay(ms: SYSTEM.INT32);
+PROCEDURE ["C", "Sockets.-set-resolve-copies"] CSetResolveCopies(n: SYSTEM.INT32);
 
 (* Whether fd becomes readable within ms milliseconds: a listener has a
    connection queued, so Accept won't wait. *)
@@ -103,5 +104,13 @@ PROCEDURE SetResolveDelay*(ms: INTEGER);
 BEGIN
   CSetResolveDelay(ms)
 END SetResolveDelay;
+
+(* Makes every lookup finished from now on give each address n times
+   over (0 or 1: once), so a host has more addresses than a caller's
+   array holds, with no name server. *)
+PROCEDURE SetResolveCopies*(n: INTEGER);
+BEGIN
+  CSetResolveCopies(n)
+END SetResolveCopies;
 
 END TestHelp.

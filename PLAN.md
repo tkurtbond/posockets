@@ -204,6 +204,9 @@ inside a busy task-based program would stall it, so
 while other tasks run, and `Sockets.ResolveWithin` and `ConnectWithin`
 count the lookup in their time limit (Phase 11). `Sockets.Resolve`
 itself still blocks: it is what `Listen` uses, once, at start.
+How many addresses a name has is the name server's to say, so each
+lookup has a form that allocates for them all (`ResolveAll` and the
+rest; "Every address: lookups that allocate").
 
 Ports are `INTEGER`s, 0..65535 (halt 84 outside), not service names
 (decided 2026-11-15): every known caller has a number, and a name would
@@ -1317,6 +1320,50 @@ abandoned lookup's thread is done, the descriptors are back to their
 count. `HaltResolution` halts with 87. `gmake test` passes on
 FreeBSD 15.1 amd64, NetBSD 11.0 amd64 and i386, and OpenBSD 7.9 amd64
 and i386 (poc 0.14.0), linking `-lpthread` from the library's manifest.
+
+### Every address: lookups that allocate [done]
+
+`Resolve`, `ResolveWithin`, `FinishResolve` and `SocketTasks.Resolve`
+fill the caller's `ARRAY OF Address` and halt (84) if a name has more
+addresses than it holds. How many a name has is outside data, from a
+name server, so a program can't size its array safely; and
+`SocketTasks.Connect` and `Sockets.ConnectWithin` themselves used an
+`ARRAY 16`, so a connection to a name with more than 16 addresses
+halted the program. Found 2026-11-19 by pogemini's address rules, which
+look up names a configuration gives.
+
+Decided 2026-11-19, with the user: lookups that allocate, beside the
+old ones, which keep their signatures (every caller passes a small
+fixed array, and a numeric host has one address):
+`Sockets.ResolveAll`, `ResolveAllWithin` and `FinishResolveAll`, and
+`SocketTasks.ResolveAll`, each giving `Addresses = POINTER TO ARRAY OF
+Address`, made to hold them all, so its `LEN` is how many. Not a linked
+list: the count is known before anything is copied, an array is indexed
+in order as `Connect` tries addresses, and a caller with a fixed array
+still has the old forms. The old ones are now the new ones and a copy
+(`Fit`), halting only when the caller's array is too small; `Connect`
+and `ConnectWithin` use the new ones and never halt on a count.
+
+In the C part, a request (the `struct resolution` of Phase 11) is
+counted (`resolve_count`) before it is finished, so the Oberon arrays
+are made to fit; the blocking lookup (`resolve_now`) makes a request
+already done, in the caller's thread, with no pipe or thread, so
+`ResolveAll` and `FinishResolveAll` share one path, and the old
+`resolve` is gone. poc halts on `NEW` of an empty open array ("Too many,
+or negative number of, elements in dynamic array", checked 2026-11-19),
+so a lookup that succeeds with no TCP address, which a caller couldn't
+use anyway, is a name error, `EAI_NONAME`, in every form.
+
+Tested by a hook like the delay's (`Sockets.-set-resolve-copies`,
+`TestHelp.SetResolveCopies`): each address given 40 times over.
+`TestResolve`, 11 checks more: `ResolveAll` of `127.0.0.1` gives all
+40, and of `localhost` 40 times what it gives once, as do
+`ResolveAllWithin`, `SocketTasks.ResolveAll` and `FinishResolveAll`;
+`FinishResolveAll` before the lookup is done gives `wouldBlock`, no
+addresses, and keeps the request; `nonexistent.invalid` is a name error
+with no addresses; `SocketTasks.Connect` and `ConnectWithin` connect to
+a host with 40 addresses; and the descriptors are back to their count.
+`make test` and `make valgrind` pass.
 
 ## Open questions
 
