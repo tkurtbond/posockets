@@ -44,6 +44,7 @@ AssertArgument* = 84;    (* an argument out of range *)
 AssertListening* = 85;   (* Accept on a socket that isn't listening, or
                             I/O on one that is *)
 AssertWaiting* = 86;     (* Close while a SocketTasks call waits on it *)
+AssertResolution* = 87;  (* a Resolution used once finished or abandoned *)
 ```
 
 Codes of the ASSERTs that catch a programmer's error. poc's ASSERT exits with status 10 and prints "assertion failed (n)".
@@ -82,6 +83,16 @@ END;
 ```
 
 What went wrong: kind, and for a system or name error the code and a text saying what was being done ("resolve example.invalid port 80: Name or service not known"), truncated, never overflowed.
+
+```oberon
+Resolution* = POINTER TO ResolutionDesc;
+ResolutionDesc* = RECORD
+  fd-: LONGINT;
+  what-: ARRAY 512 OF CHAR (* "resolve <host> port <port>", for errors *)
+END;
+```
+
+A lookup started by StartResolve, in a thread of the C part for a name (PLAN.md, Phase 11). fd is the descriptor that becomes readable when it is done, or -1 if it was done at once (a numeric or empty host). FinishResolve or AbandonResolve frees it.
 
 ## Variables
 
@@ -148,6 +159,32 @@ PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER;
 ```
 
 host's addresses for a TCP connection to port, as getaddrinfo gives them, in its order, into addrs[0..n-1]. A numeric host never consults a name server; a name may, and blocks every task meanwhile. An empty host gives the loopback addresses. A name that doesn't resolve is a name error. Halts (AssertArgument) for a port outside 0..65535, or if addrs can't hold every address.
+
+#### StartResolve
+
+```oberon
+PROCEDURE StartResolve*(host: ARRAY OF CHAR; port: INTEGER;
+    VAR r: Resolution; VAR err: Error): BOOLEAN;
+```
+
+Starts looking up host's TCP addresses for port, as Resolve does, into r, without waiting for the answer: a name is looked up by getaddrinfo in a thread of the C part, which touches no Oberon memory, while the program goes on, and r.fd becomes readable when it is done. A numeric or empty host is looked up at once, with no thread, and r.fd is -1. Then FinishResolve gives the addresses, or AbandonResolve gives them up; a finalizer abandons a Resolution that is neither, as a backstop. FALSE, with a system error, only if no pipe or thread could be had (EMFILE, EAGAIN); a name that doesn't resolve is FinishResolve's error. Halts (AssertArgument) for a port outside 0..65535.
+
+#### FinishResolve
+
+```oberon
+PROCEDURE FinishResolve*(r: Resolution; VAR addrs: ARRAY OF Address;
+    VAR n: INTEGER; VAR err: Error): BOOLEAN;
+```
+
+r's addresses into addrs[0..n-1], or its error, as Resolve gives them, once r is done (r.fd readable, or -1), freeing r; before then FALSE with wouldBlock (want wantRead), keeping it. Halts (AssertResolution) for an r already finished or abandoned, (AssertArgument) if addrs can't hold every address (r is freed first).
+
+#### AbandonResolve
+
+```oberon
+PROCEDURE AbandonResolve*(r: Resolution);
+```
+
+Gives up r: frees it now if its lookup is done, or has its thread free it when it is (it can't be stopped sooner). r.fd is closed then, or later, and is -1 here at once. Does nothing for an r already finished or abandoned.
 
 #### Listen
 
@@ -322,6 +359,15 @@ PROCEDURE SetNonBlocking*(s: Socket; on: BOOLEAN; VAR err: Error): BOOLEAN;
 
 Sets (on) or clears O_NONBLOCK on s.
 
+#### ResolveWithin
+
+```oberon
+PROCEDURE ResolveWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
+```
+
+host's TCP addresses for port, as Resolve gives them, waiting in the kernel at most ms milliseconds (0: no limit) for a name's lookup (StartResolve), which goes on in its thread after a timeout, and is freed when done: then FALSE with timedOut, "resolve <host> port <port>: timed out". It stops every task while it waits, as Resolve does, but no longer than ms. Halts (AssertArgument) for a port outside 0..65535, a negative ms, or if addrs can't hold every address.
+
 #### ConnectWithin
 
 ```oberon
@@ -329,7 +375,7 @@ PROCEDURE ConnectWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
     nonBlocking: BOOLEAN; VAR s: Socket; VAR err: Error): BOOLEAN;
 ```
 
-A connection to host and port, as SocketTasks.Connect makes it but without tasks: each of host's addresses in getaddrinfo's order until one connects, reporting the last error, in at most ms milliseconds for them all (0: no limit), waiting in the kernel (Await). Resolving the name isn't counted in ms. s is non-blocking if nonBlocking, else blocking; on failure it is NIL, on success it has no deadline. Halts (AssertArgument) for a port outside 0..65535 or a negative ms.
+A connection to host and port, as SocketTasks.Connect makes it but without tasks: each of host's addresses in getaddrinfo's order until one connects, reporting the last error, in at most ms milliseconds for them all, the lookup included (ResolveWithin; 0: no limit), waiting in the kernel (Await). s is non-blocking if nonBlocking, else blocking; on failure it is NIL, on success it has no deadline. Halts (AssertArgument) for a port outside 0..65535 or a negative ms.
 
 #### Adopt
 

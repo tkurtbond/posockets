@@ -13,14 +13,15 @@ It is planned to offer:
 
 - TCP over IPv4 and IPv6: listen, accept, connect, read, write,
   shutdown and close, with local and peer addresses as text;
-- host names resolved with `getaddrinfo`;
+- host names resolved with `getaddrinfo`, blocking or, for tasks and
+  time limits, in a thread of its own;
 - Unix-domain stream sockets and socket pairs;
 - blocking calls for simple programs, and non-blocking calls that wait
   through `Tasks` (module `SocketTasks`), with deadlines;
 - errors from the network or the system returned as a result, never a
   halt.
 
-**Status: early.** Phases 1 to 6, 8, 9 and 10 of [PLAN.md](PLAN.md) are done:
+**Status: early.** Phases 1 to 6 and 8 to 11 of [PLAN.md](PLAN.md) are done:
 the build and tests, errors, addresses as text, resolving names, socket
 pairs, and blocking TCP over IPv4 and IPv6 (`Listen`, `Accept`,
 `Connect`, `Read`, `Write`, `WriteAll`, `Shutdown`, `Close`), with
@@ -29,7 +30,10 @@ non-blocking sockets, and `SocketTasks`, which waits through poc's
 waits, time limits on connecting, and a lingering close; and
 Unix-domain stream sockets (`ListenUnix`, `ConnectUnix`); and
 examples and a reference; and deadlines without tasks (`Await`,
-`ConnectWithin`), for a blocking program that bounds each wait; on Linux, FreeBSD, OpenBSD and NetBSD.
+`ConnectWithin`), for a blocking program that bounds each wait; and
+names resolved without stopping other tasks (`SocketTasks.Resolve`,
+`Sockets.ResolveWithin`, `StartResolve`), so a time limit on
+connecting counts the lookup too; on Linux, FreeBSD, OpenBSD and NetBSD.
 Socket options wait for a program that needs them. PLAN.md has the design and the
 roadmap; [AGENTS.md](AGENTS.md) has the working notes.
 
@@ -47,8 +51,10 @@ roadmap; [AGENTS.md](AGENTS.md) has the working notes.
   Phase 9). On the BSDs, build with GNU make (`gmake`).
 - valgrind, for `make valgrind` (Linux).
 
-The library links nothing beyond the C library and poDateTime, so a
-program using it needs no extra flags.
+The library links nothing beyond the C library, `-lpthread` (each
+lookup that doesn't stop other tasks runs `getaddrinfo` in a thread of
+its own) and poDateTime, and records them, so a program using it needs
+no extra flags.
 
 Two things a program using `SocketTasks` meets that come from poc's
 `Tasks`, not from posockets:

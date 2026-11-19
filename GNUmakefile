@@ -3,9 +3,9 @@
 #
 # The library posockets is built in $(LIBDIR), with each module's C part
 # (src/<Module>.c beside src/<Module>.Mod) compiled and archived with it.
-# It links nothing beyond libc and poDateTime, so neither the library nor a
-# program using it needs flags, though poDateTime must be on the program's
-# library path. The tests and examples take the library from there, so
+# It links nothing beyond libc, the threads library (-lpthread, which the
+# library records, so a program using it passes no flags) and poDateTime,
+# though poDateTime must be on the program's library path. The tests and examples take the library from there, so
 # they test this checkout and what make install would install.
 #
 # poc writes each module's .sym, .ll and .o, and the programs, into $(BUILD).
@@ -70,11 +70,15 @@ endif
 # Where a program finds posockets and what it needs: this checkout's
 # library first, so an installed posockets is never taken in its place.
 LIBPATH := -library-path $(LIBDIR) -library-path $(PODATETIME)
+# Recorded in the library, for every program using it: names are looked
+# up in a thread (PLAN.md, Phase 11), and pthread_create is in libpthread
+# on the BSDs (in glibc's libc since 2.34, where -lpthread is harmless).
+LINK := -link -lpthread
 
 # The modules and their C parts, whichever have one.
 LIBSRC := $(LIBMODS:%=src/%.Mod) $(wildcard $(LIBMODS:%=src/%.c))
 # Test programs (test/<name>.Mod, each a main module).
-TESTS := TestAddress TestBlocking TestErrors TestTasks TestDeadline TestAwait TestUnix TestEcho TestNetcat TestForward TestFileServer
+TESTS := TestAddress TestBlocking TestErrors TestTasks TestDeadline TestAwait TestResolve TestUnix TestEcho TestNetcat TestForward TestFileServer
 # Programs the tests start (test/<name>.Mod), not tests themselves.
 HELPERS := BlockingPeer TooManyFiles
 # Programs that must halt (test/<name>.Mod), as name:Assert-code. poc's
@@ -83,7 +87,7 @@ HELPERS := BlockingPeer TooManyFiles
 HALTTESTS := HaltClosed:80 HaltPort:84 HaltAddrs:84 HaltRange:81 HaltListening:85 \
   HaltAccept:85 HaltBacklog:84 HaltListeners:84 HaltShutdown:84 \
   HaltBlocking:82 HaltWaiting:86 HaltDeadline:84 HaltAwait:84 \
-  HaltPath:83 HaltEmptyPath:84
+  HaltPath:83 HaltEmptyPath:84 HaltResolution:87
 ASSERTSTATUS := 10
 
 # Example programs (examples/<name>.Mod), as name:required-exit-status.
@@ -114,7 +118,7 @@ $(BUILD):
 $(LIBDIR)/$(LIBRARY)-%.stamp: $(LIBSRC) $(POCBIN) | $(BUILD)
 	mkdir -p $(LIBDIR)
 	cd src && $(POC) $(call variant-flags,$*) -output-dir $(abspath $(LIBDIR)) \
-	  -library-path $(abspath $(PODATETIME)) -library $(LIBRARY) $(LIBMODS:%=%.Mod)
+	  -library-path $(abspath $(PODATETIME)) $(LINK) -library $(LIBRARY) $(LIBMODS:%=%.Mod)
 	touch $@
 
 $(BUILD)/Test%: test/Test%.Mod test/Check.Mod test/TestHelp.Mod test/TestHelp.c test/Run.Mod $(LIBDIR)/$(LIBRARY)-OC.stamp | $(BUILD)

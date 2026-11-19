@@ -42,6 +42,16 @@ The next connection on listener l, as a non-blocking s, waiting until one comes 
 
 An accept loop that must stop gives l a short deadline before each Accept and, on timedOut, checks a flag the program sets to stop it (PLAN.md, "Stopping a server").
 
+#### Resolve
+
+```oberon
+PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: ARRAY OF Sockets.Address; VAR n: INTEGER;
+    VAR err: Sockets.Error): BOOLEAN;
+```
+
+host's TCP addresses for port, as Sockets.Resolve gives them, but with a name looked up in a thread of the C part (Sockets.StartResolve) while this task waits and others run, for at most ms milliseconds (0: no limit). Past ms, FALSE with timedOut, "resolve <host> port <port>: timed out"; the lookup goes on in its thread, and is freed when done. Halts (Sockets.AssertArgument) for a port outside 0..65535, a negative ms, or if addrs can't hold every address.
+
 #### ConnectTo
 
 ```oberon
@@ -58,7 +68,7 @@ PROCEDURE Connect*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
     VAR s: Sockets.Socket; VAR err: Sockets.Error): BOOLEAN;
 ```
 
-A connection to host and port, as a non-blocking s: each of host's addresses in getaddrinfo's order until one connects, reporting the last error ("connect to 127.0.0.1 port 7: Connection refused"), in at most ms milliseconds for them all (0: no limit, as ConnectTo). Resolving the name is Sockets.Resolve, which waits in the kernel and so stops every task while it does, and isn't counted in ms (PLAN.md, "Open questions"); a name that doesn't resolve gives its error ("resolve example.invalid port 80: ..."). Halts (Sockets.AssertArgument) for a port outside 0..65535 or a negative ms.
+A connection to host and port, as a non-blocking s: each of host's addresses in getaddrinfo's order until one connects, reporting the last error ("connect to 127.0.0.1 port 7: Connection refused"), in at most ms milliseconds for them all, the lookup (Resolve) included (0: no limit, as ConnectTo). A name that doesn't resolve gives its error ("resolve example.invalid port 80: ..."). Halts (Sockets.AssertArgument) for a port outside 0..65535 or a negative ms.
 
 #### ConnectUnix
 

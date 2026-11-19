@@ -49,7 +49,13 @@ reference in `doc/`; tested on Linux, FreeBSD, OpenBSD and NetBSD.
 Phase 7, socket options, waits for a user to ask for one. Since
 2026-11-16 `Sockets.Now`, and so the deadlines, take poDateTime's
 monotonic clock (PLAN.md, "poDateTime's clock": Peaseblossom's
-"Ongoing library enhancements" 7, step 3).
+"Ongoing library enhancements" 7, step 3). Since 2026-11-19 names resolve
+without stopping other tasks (Phase 11): `Sockets.StartResolve`,
+`FinishResolve`, `AbandonResolve` and `ResolveWithin`, and
+`SocketTasks.Resolve`, a `getaddrinfo` in a detached C thread per
+lookup, signalled through a pipe; `SocketTasks.Connect` and
+`Sockets.ConnectWithin` count the lookup in their time limit
+(`TestResolve`, `HaltResolution`).
 
 **poc 0.13.0 or later** (`Tasks.AwaitReadableFor`), **and poDateTime
 built by the same poc.** This machine (atla) and the BSD hosts have
@@ -83,7 +89,9 @@ default), with `POC` from `PATH`, output under `build/` via
 installed copy is never tested in place of this checkout. `LIBMODS`
 lists the library's modules, and `LIBSRC` takes each one's C part
 (`src/<Module>.c`) if it has one. The library
-links nothing beyond libc and poDateTime, so a program using posockets
+links nothing beyond libc, `-lpthread` (`LINK`, recorded in the
+library: the BSDs need it for Phase 11's lookup threads, and glibc
+since 2.34 has it in libc) and poDateTime, so a program using posockets
 passes no flags, though poDateTime must be on its library path.
 poDateTime comes from `PODATETIME` (default `POCLIBDIR`), after
 `build/lib` on the library path, so an installed posockets there never
@@ -241,6 +249,16 @@ Each was confirmed by a program that ran, with poc 0.12.0 on Fedora 44
 - **`getaddrinfo` leaves memory still reachable at exit**: glibc
   `dlopen`s the NSS modules and keeps them, so valgrind shows the
   loader's blocks with stacks through `dl-open.c`.
+- **A C thread may run beside poc's tasks** if it touches only C memory
+  and blocks every signal: a detached thread per `getaddrinfo`, waking
+  its task through a pipe, ran while another task collected garbage
+  every 10 ms, memcheck-clean (Phase 11; checked 2026-11-19, poc
+  0.14.0). poc's runtime has no thread of its own, and the collector
+  scans only the main thread's stack, so nothing in Oberon memory may
+  be given to the thread.
+- **`Sockets.c` needs clang**: GNU `as` rejects its `Sockets.-name`
+  `__asm__` labels, so check it by hand with `clang -Wall -Wextra -c`,
+  never `cc` (2026-11-19).
 - **A library with no C part and no procedures** builds with `poc
   -library`, installs with `-install-library`, and a program built with
   `-library-path` at the install directory takes it from there, not

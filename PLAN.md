@@ -199,8 +199,11 @@ text.
 while it does. For a server that only binds its own addresses this is
 harmless (it resolves once, at start), and numeric hosts never block
 (`AI_NUMERICHOST` is tried first, in C). A client resolving names
-inside a busy task-based program would stall it; an asynchronous
-resolver is out of scope for now (Open questions).
+inside a busy task-based program would stall it, so
+`SocketTasks.Resolve` and `Connect` resolve in a thread of the C part
+while other tasks run, and `Sockets.ResolveWithin` and `ConnectWithin`
+count the lookup in their time limit (Phase 11). `Sockets.Resolve`
+itself still blocks: it is what `Listen` uses, once, at start.
 
 Ports are `INTEGER`s, 0..65535 (halt 84 outside), not service names
 (decided 2026-11-15): every known caller has a number, and a name would
@@ -435,7 +438,7 @@ is in reach, and it solves stopping a server (Tasks) too.
   decided 2026-11-15. `Connect`'s covers all the addresses together;
   each address still gets at least 1 ms, so one that connects at once
   does, and the error names the last address tried. Resolving isn't
-  counted (Open questions). The socket returned has no deadline.
+  counted (Open questions; counted since Phase 11). The socket returned has no deadline.
 - Two tasks waiting on one socket share its deadline (one field).
   A proxy that wants separate limits for reading and writing sets the
   deadline before each call; nothing more is offered until a user
@@ -555,6 +558,7 @@ Recorded as found, each with the `#ifdef` that handles it:
 | 84 | an argument out of range: port outside 0..65535, negative backlog, unknown `how` or family, a `listeners` or `addrs` array too small, an empty Unix-domain path, a negative time limit |
 | 85 | `Accept` on a socket that isn't listening, or I/O on one that is (`listening`) |
 | 86 | `Close` on a socket a `SocketTasks` call is waiting on (`waiters` > 0) |
+| 87 | a `Resolution` used after `FinishResolve` or `AbandonResolve` (Phase 11) |
 
 Code 82 no longer covers "`SocketTasks` used outside a task" (changed
 2026-11-15): the main program is a task, so that can't happen.
@@ -840,7 +844,8 @@ Done 2026-11-15:
   `wouldBlock`, `Tasks.AwaitReadable`/`AwaitWritable` on the socket,
   between `Sockets.BeginWait` and `EndWait`. A blocking socket halts
   (82); every socket made is non-blocking. `Connect` resolves with
-  `Sockets.Resolve` (which waits in the kernel: Open questions), then
+  `Sockets.Resolve` (which waits in the kernel: Open questions; since
+  Phase 11, `SocketTasks.Resolve`, which doesn't), then
   `ConnectTo`s each address in turn, reporting the last error; a name
   that doesn't resolve gives `Resolve`'s text ("resolve ... port
   ..."), not `Sockets.Connect`'s.
@@ -1200,6 +1205,119 @@ Done 2026-11-18:
   tests'. `TestAwait` looks up `nonexistent.invalid` before counting
   descriptors, as `TestErrors` does, for NetBSD's resolver.
 
+### Phase 11: asynchronous name resolution [done]
+
+For a client resolving names among other tasks (pogeminilib's client
+in a task-based program, a proxy), where `getaddrinfo` would stop
+every task for as long as the name server takes, and for a time limit
+on connecting that counts the lookup too (Open questions).
+
+Spike (2026-11-19, poc 0.14.0, glibc on Fedora 44, a throwaway program
+with its own C part): a detached `pthread` per lookup, given a copy of
+the host in C memory, ran `getaddrinfo` and wrote a byte to a pipe,
+whose read end a task awaited with `Tasks.AwaitReadableFor`. Meanwhile
+another task allocated and called `GarbageCollectedHeap.Collect` every
+10 ms (247 collections), and went on ticking through each lookup:
+`localhost` behind a 1 s sleep, `example.org` over the network,
+`nonexistent.invalid`. A lookup abandoned after 200 ms, its thread
+still asleep, was freed by the thread when it finished. Under memcheck
+(with `poc-gc.supp`): no errors but the two descriptors of Tasks'
+self-pipe, nothing lost, and what is still reachable is glibc's loader
+keeping the NSS modules `dlopen`ed from the thread, which
+`vg-reachable.sh` already allows. The collector never sees the thread:
+it touches only C memory, and poc's runtime has no thread of its own.
+
+Design:
+
+- **One detached thread per lookup, not a pool.** Lookups are few (a
+  client's connections), a thread is cheap next to a name server's
+  answer, and a pool would need a queue, a size and shutdown. Each
+  lookup's state is a C `struct` (`malloc`ed): the host copied in, the
+  port, a mutex, the pipe's two ends, and `getaddrinfo`'s result
+  (`lookup`, unchanged, run by the thread).
+- **Numeric hosts and the empty host start no thread**: `lookup`'s
+  `AI_NUMERICHOST` try runs at once in the caller, as now, and the
+  result is ready, with no pipe (descriptor -1). Only a name that needs
+  NSS starts a thread, so the tests' `127.0.0.1` and `::1` don't.
+- **The thread blocks every signal** (`pthread_sigmask` around
+  `pthread_create`, so it inherits a full mask), so `SIGINT` and
+  `SIGTERM` for `StopRequests`, and anything else, stay the main
+  thread's, which is the only one that runs Oberon code.
+- **Who frees.** The mutex guards two flags, `done` and `abandoned`.
+  The thread, when `getaddrinfo` returns: if abandoned, it frees the
+  whole request; otherwise it sets `done` and writes one byte to the
+  pipe. `FinishResolve` (after the byte) converts the addresses, as
+  `resolve` does now, and frees. `AbandonResolve`: if done, it frees;
+  otherwise it sets `abandoned`, and the thread frees later. So the
+  pipe's write end is never written after it is closed (no `SIGPIPE`),
+  and each request is freed exactly once. Both ends are `O_CLOEXEC`,
+  the read end non-blocking.
+- **Oberon side, in `Sockets`**: an opaque `Resolution` (the C
+  handle, the descriptor to wait on, and host and port for an error's
+  text), with
+  - `StartResolve(host, port, VAR r, VAR err): BOOLEAN`: a system
+    error if no pipe or thread can be had (`EMFILE`, `EAGAIN`); a
+    numeric host that doesn't parse goes on to the thread, as now;
+  - `r.fd`, a read-only field, the descriptor to wait on, -1 if the
+    result is ready already or `r` is finished or abandoned (a field
+    rather than the planned `ResolutionDescriptor(r)`, as `Socket.fd`
+    is), and `r.what`, "resolve <host> port <port>", for an error's
+    text;
+  - `FinishResolve(r, VAR addrs, VAR n, VAR err): BOOLEAN`, `Resolve`'s
+    results and errors once ready, `wouldBlock` before; it frees `r`'s
+    C part;
+  - `AbandonResolve(r)`, idempotent for a finished one;
+  - a finalizer that abandons, as a backstop;
+  - halt 87 for a `Resolution` used after it is finished or abandoned,
+    other than by `AbandonResolve`;
+  - `ResolveWithin(host, port, ms, VAR addrs, VAR n, VAR err)`, without
+    tasks: start, `poll` the descriptor (the C `await`) for at most `ms`
+    (0: no limit), then finish, or abandon and time out, "resolve
+    <host> port <port>: timed out".
+- **In `SocketTasks`**: `Resolve(host, port, ms, VAR addrs, VAR n, VAR
+  err)`, the same through `Tasks.AwaitReadableFor`; `Connect` resolves
+  with it, and its `ms` now covers lookup and connection together, as
+  does `Sockets.ConnectWithin`'s. `Sockets.Resolve`, `Connect` and
+  `Listen` stay as they are, blocking.
+- **Linking**: `pthread_create` needs `-lpthread` on FreeBSD, NetBSD
+  and OpenBSD (glibc has it in libc since 2.34), so the library records
+  `-link -lpthread` for every program using it.
+- **Limits, documented**: an abandoned lookup's thread lives until
+  `getaddrinfo` gives up (the resolver's timeouts, `resolv.conf`), so a
+  program that keeps abandoning lookups to a dead name server can
+  gather threads for that long; a program that ends while a lookup is
+  in flight leaves its request unfreed at exit (valgrind shows it as
+  still reachable, so tests wait for their abandoned lookups). A child
+  forked while a lookup runs must only `exec` (pounix's does).
+
+Tests (`TestResolve`): `localhost` and the numeric hosts resolve as
+`Resolve` does; a task keeps running while a lookup is in flight; a
+lookup abandoned at its time limit, then descriptors back to their
+count once its thread is done; `nonexistent.invalid` as a name error;
+`ResolveWithin` likewise without tasks; a halt test for 87. A lookup
+slow enough to time out without a name server comes from a test hook
+in the C part (a delay before `getaddrinfo`), set only by the tests.
+
+Done 2026-11-19, as designed. `TestResolve` (25 checks) passes, under
+`make valgrind` too, with nothing lost and nothing still reachable but
+the collector's and the loader's: the numeric hosts and the empty one
+are ready at once with `fd` -1 and no descriptor left; `localhost`
+through `Tasks.AwaitReadable` and `FinishResolve`, `SocketTasks.Resolve`
+and `ResolveWithin` (with and without a limit); `nonexistent.invalid`
+as a name error. With the test hook's 300 ms delay
+(`Sockets.-set-resolve-delay`, which `TestHelp.SetResolveDelay`
+declares): a ticker task advanced while a lookup waited;
+`FinishResolve` before the byte gives `wouldBlock`, `wantRead`;
+`AbandonResolve` twice; `SocketTasks.Resolve` and `ResolveWithin` time
+out near 100 ms, "resolve localhost port 80: timed out", and so do
+`SocketTasks.Connect` and `Sockets.ConnectWithin` to `localhost`,
+naming the lookup, while `127.0.0.1` connects within 100 ms; a dropped
+`Resolution`, collected, is abandoned by its finalizer; and once every
+abandoned lookup's thread is done, the descriptors are back to their
+count. `HaltResolution` halts with 87. `gmake test` passes on
+FreeBSD 15.1 amd64, NetBSD 11.0 amd64 and i386, and OpenBSD 7.9 amd64
+and i386 (poc 0.14.0), linking `-lpthread` from the library's manifest.
+
 ## Open questions
 
 - ~~**Module names.** `Sockets` and `SocketTasks`, or a prefix
@@ -1209,12 +1327,17 @@ Done 2026-11-18:
   wait added to `Tasks` upstream?~~ Decided 2026-11-15: a timed wait
   added to poc's `Tasks` (Deadlines), and added there the same day
   (`AwaitReadableFor`/`AwaitWritableFor`).
-- **Asynchronous name resolution.** `getaddrinfo` stops every task,
+- ~~**Asynchronous name resolution.** `getaddrinfo` stops every task,
   and isn't counted in `SocketTasks.Connect`'s time limit.
   Options if a user needs names resolved while serving: resolve in a
   child process and read the answer through a pipe; `getaddrinfo_a`
   (glibc only); or a small DNS client of our own. Not needed by the
-  Gemini server, which resolves only at start.
+  Gemini server, which resolves only at start.~~ Decided 2026-11-19:
+  `getaddrinfo` in a detached C thread per lookup, waking the caller
+  through a pipe (Phase 11). A thread asks nothing new of the system
+  (c-ares would be a new dependency on every host, `getaddrinfo_a` is
+  glibc's, a DNS client of our own would bypass `/etc/hosts` and NSS),
+  and a child process costs a fork per lookup.
 - **`Address` as text.** Text is simple and portable; a caller that
   compares addresses (rate limiting by client) would want the bytes.
   Add a binary form only when such a caller appears.

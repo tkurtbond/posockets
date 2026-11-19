@@ -132,6 +132,39 @@ BEGIN
   RETURN ok
 END Finish;
 
+(* host's TCP addresses for port, as Sockets.Resolve gives them, but
+   with a name looked up in a thread of the C part (Sockets.StartResolve)
+   while this task waits and others run, for at most ms milliseconds (0:
+   no limit). Past ms, FALSE with timedOut, "resolve <host> port <port>:
+   timed out"; the lookup goes on in its thread, and is freed when done.
+   Halts (Sockets.AssertArgument) for a port outside 0..65535, a
+   negative ms, or if addrs can't hold every address. *)
+PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: ARRAY OF Sockets.Address; VAR n: INTEGER;
+    VAR err: Sockets.Error): BOOLEAN;
+  VAR r: Sockets.Resolution; end, left: LONGINT;
+BEGIN
+  ASSERT(ms >= 0, Sockets.AssertArgument);
+  n := 0;
+  IF ~Sockets.StartResolve(host, port, r, err) THEN RETURN FALSE END;
+  end := Sockets.Now() + ms;
+  (* The thread writes its byte once, so one wake is the answer, but a
+     wait may end early by Now (Tasks' timers count from its clock). *)
+  WHILE ~Sockets.FinishResolve(r, addrs, n, err) DO
+    IF err.kind # Sockets.wouldBlock THEN RETURN FALSE END;
+    IF ms = 0 THEN Tasks.AwaitReadable(r.fd)
+    ELSE
+      left := end - Sockets.Now();
+      IF (left <= 0) OR ~Tasks.AwaitReadableFor(r.fd, left)
+        & (end - Sockets.Now() <= 0) THEN
+        Sockets.AbandonResolve(r);
+        Sockets.TimedOut(NIL, err, r.what); RETURN FALSE
+      END
+    END
+  END;
+  RETURN TRUE
+END Resolve;
+
 (* A connection to one address, as Sockets.Resolve gives it, as a
    non-blocking s, waiting while it is made: at most ms milliseconds,
    or as long as the system tries if ms = 0 (on Linux about two minutes
@@ -149,10 +182,8 @@ END ConnectTo;
 (* A connection to host and port, as a non-blocking s: each of host's
    addresses in getaddrinfo's order until one connects, reporting the
    last error ("connect to 127.0.0.1 port 7: Connection refused"), in at
-   most ms milliseconds for them all (0: no limit, as ConnectTo).
-   Resolving the name is Sockets.Resolve, which waits in the kernel and
-   so stops every task while it does, and isn't counted in ms (PLAN.md,
-   "Open questions"); a name that doesn't resolve gives its error
+   most ms milliseconds for them all, the lookup (Resolve) included (0:
+   no limit, as ConnectTo). A name that doesn't resolve gives its error
    ("resolve example.invalid port 80: ..."). Halts
    (Sockets.AssertArgument) for a port outside 0..65535 or a negative
    ms. *)
@@ -162,8 +193,8 @@ PROCEDURE Connect*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
 BEGIN
   ASSERT(ms >= 0, Sockets.AssertArgument);
   s := NIL;
-  IF ~Sockets.Resolve(host, port, addrs, n, err) THEN RETURN FALSE END;
   end := Sockets.Now() + ms; left := 0;
+  IF ~Resolve(host, port, ms, addrs, n, err) THEN RETURN FALSE END;
   i := 0;
   WHILE i < n DO
     IF ms > 0 THEN

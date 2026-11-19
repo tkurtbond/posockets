@@ -34,16 +34,19 @@
 #include <limits.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define NAME(n) __asm__("Sockets.-" n)
@@ -292,27 +295,17 @@ static void describe(const char *verb, const struct sockaddr *sa,
 		 (int)port);
 }
 
-/* Resolve: getaddrinfo's TCP addresses for host and port, each written
-   as family, numeric host text and port: hosts is max rows of stride
-   bytes each. *count receives how many there are, which may be more
-   than max (Oberon halts then). Returns 0, or the kind with *code. */
-int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
-		int32_t *families, address hosts, length stride,
-		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
-	NAME("resolve");
-int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
-		int32_t *families, address hosts, length stride,
-		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
+/* Writes res's TCP addresses (inet and inet6 only) as family, numeric
+   host text and port: hosts is max rows of stride bytes each. *count
+   receives how many there are, which may be more than max (Oberon
+   halts then). Returns 0, or KIND_SYSTEM with *code. */
+static int32_t addresses(const struct addrinfo *res, int32_t *families,
+			 address hosts, length stride, int32_t *ports,
+			 int32_t max, int32_t *count, int32_t *code)
 {
-	struct addrinfo *res, *ai;
-	int32_t kind;
-	int i;
+	const struct addrinfo *ai;
+	int i = 0;
 
-	*count = 0;
-	kind = lookup(host, hostlen, port, passive, &res, code);
-	if (kind != 0)
-		return kind;
-	i = 0;
 	for (ai = res; ai != NULL; ai = ai->ai_next) {
 		if (!inet_family(ai))
 			continue;
@@ -322,16 +315,259 @@ int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
 					      (char *)hosts + i * stride,
 					      (size_t)stride, &ports[i]);
 			if (e != 0) {
-				freeaddrinfo(res);
 				*code = e;
 				return KIND_SYSTEM;
 			}
 		}
 		i++;
 	}
-	freeaddrinfo(res);
 	*count = i;
 	return 0;
+}
+
+/* Resolve: getaddrinfo's TCP addresses for host and port, as addresses
+   writes them. Returns 0, or the kind with *code. */
+int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
+		int32_t *families, address hosts, length stride,
+		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
+	NAME("resolve");
+int32_t resolve(address host, length hostlen, int32_t port, int32_t passive,
+		int32_t *families, address hosts, length stride,
+		int32_t *ports, int32_t max, int32_t *count, int32_t *code)
+{
+	struct addrinfo *res;
+	int32_t kind;
+
+	*count = 0;
+	kind = lookup(host, hostlen, port, passive, &res, code);
+	if (kind != 0)
+		return kind;
+	kind = addresses(res, families, hosts, stride, ports, max, count,
+			 code);
+	freeaddrinfo(res);
+	return kind;
+}
+
+/* A lookup in a thread of its own (PLAN.md, Phase 11), for StartResolve,
+   FinishResolve and AbandonResolve. The thread touches only this struct,
+   in C memory, never Oberon's, which the collector wouldn't see it use.
+   lock guards done and abandoned, which decide who frees it: the
+   thread, if the caller abandoned it first; the caller otherwise. The
+   thread writes one byte to wfd when done and not abandoned, so the
+   pipe is never written after the caller is gone. rfd and wfd are -1
+   for a request done at once (a numeric or empty host). */
+struct resolution {
+	pthread_mutex_t lock;
+	int done, abandoned;
+	int rfd, wfd;
+	int delay;		/* ms before getaddrinfo: tests only */
+	char host[NI_MAXHOST];
+	int32_t port;
+	struct addrinfo *res;
+	int32_t kind, code;
+};
+
+/* Set by the tests alone (TestHelp), to make a lookup slow enough to
+   time out without a name server; read when a lookup starts. */
+static int resolve_delay;
+
+void set_resolve_delay(int32_t ms) NAME("set-resolve-delay");
+void set_resolve_delay(int32_t ms)
+{
+	resolve_delay = ms;
+}
+
+static void free_resolution(struct resolution *q)
+{
+	if (q->res != NULL)
+		freeaddrinfo(q->res);
+	if (q->rfd >= 0)
+		close(q->rfd);
+	if (q->wfd >= 0)
+		close(q->wfd);
+	pthread_mutex_destroy(&q->lock);
+	free(q);
+}
+
+static void *resolve_thread(void *arg)
+{
+	struct resolution *q = arg;
+	struct addrinfo *res;
+	int32_t kind, code;
+	int abandoned;
+	char byte = 1;
+
+	if (q->delay > 0) {
+		struct timespec t;
+
+		t.tv_sec = q->delay / 1000;
+		t.tv_nsec = (long)(q->delay % 1000) * 1000000L;
+		while (nanosleep(&t, &t) != 0 && errno == EINTR)
+			;
+	}
+	kind = lookup((address)q->host, (length)sizeof q->host, q->port, 0,
+		      &res, &code);
+	pthread_mutex_lock(&q->lock);
+	q->res = res;
+	q->kind = kind;
+	q->code = code;
+	abandoned = q->abandoned;
+	if (!abandoned) {
+		q->done = 1;
+		while (write(q->wfd, &byte, 1) < 0 && errno == EINTR)
+			;
+	}
+	pthread_mutex_unlock(&q->lock);
+	if (abandoned)
+		free_resolution(q);
+	return NULL;
+}
+
+/* StartResolve: starts looking up host and port, into *handle. A
+   numeric or empty host is looked up at once, with no thread, and *fd
+   is -1; for a name, a thread is started, and *fd is the descriptor
+   that becomes readable when it is done. Returns 0, or an errno value
+   if no memory, pipe or thread could be had. */
+int32_t resolve_start(address host, length hostlen, int32_t port,
+		      address *handle, int64_t *fd) NAME("resolve-start");
+int32_t resolve_start(address host, length hostlen, int32_t port,
+		      address *handle, int64_t *fd)
+{
+	struct resolution *q;
+	struct addrinfo hints;
+	char serv[16];
+	size_t n = bounded_length((const char *)host, hostlen);
+	int p[2], r;
+	pthread_attr_t attr;
+	pthread_t thread;
+	sigset_t all, old;
+
+	*handle = 0;
+	*fd = -1;
+	q = calloc(1, sizeof *q);
+	if (q == NULL)
+		return ENOMEM;
+	if ((r = pthread_mutex_init(&q->lock, NULL)) != 0) {
+		free(q);
+		return r;
+	}
+	q->rfd = q->wfd = -1;
+	q->port = port;
+	q->delay = resolve_delay;
+	if (n >= sizeof q->host) {
+		/* as lookup reports it */
+		q->done = 1;
+		q->kind = KIND_NAME;
+		q->code = EAI_NONAME;
+		*handle = (address)q;
+		return 0;
+	}
+	memcpy(q->host, (const char *)host, n);
+	q->host[n] = '\0';
+
+	/* A numeric host never consults a name server: no thread. */
+	snprintf(serv, sizeof serv, "%d", (int)port);
+	memset(&hints, 0, sizeof hints);
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_NUMERICSERV | AI_NUMERICHOST;
+	r = getaddrinfo(n > 0 ? q->host : NULL, serv, &hints, &q->res);
+	if (r != EAI_NONAME || n == 0) {
+		if (r != 0) {
+			q->res = NULL;
+			if (r == EAI_SYSTEM) {
+				q->kind = KIND_SYSTEM;
+				q->code = errno;
+			} else {
+				q->kind = KIND_NAME;
+				q->code = r;
+			}
+		}
+		q->done = 1;
+		*handle = (address)q;
+		return 0;
+	}
+	q->res = NULL;
+
+	if (pipe(p) != 0) {
+		r = errno;
+		free_resolution(q);
+		return r;
+	}
+	q->rfd = p[0];
+	q->wfd = p[1];
+	if (fcntl(p[0], F_SETFD, FD_CLOEXEC) != 0
+	    || fcntl(p[1], F_SETFD, FD_CLOEXEC) != 0
+	    || fcntl(p[0], F_SETFL, O_NONBLOCK) != 0) {
+		r = errno;
+		free_resolution(q);
+		return r;
+	}
+	if ((r = pthread_attr_init(&attr)) != 0) {
+		free_resolution(q);
+		return r;
+	}
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	/* The thread inherits a full mask, so every signal stays the
+	   main thread's, the only one that runs Oberon code. */
+	sigfillset(&all);
+	pthread_sigmask(SIG_SETMASK, &all, &old);
+	r = pthread_create(&thread, &attr, resolve_thread, q);
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
+	pthread_attr_destroy(&attr);
+	if (r != 0) {
+		free_resolution(q);
+		return r;
+	}
+	*handle = (address)q;
+	*fd = q->rfd;
+	return 0;
+}
+
+/* FinishResolve: once done, writes the addresses as resolve does and
+   frees the request, returning 0 or the kind with *code. Before it is
+   done, returns WOULD_BLOCK and keeps it. */
+int32_t resolve_finish(address handle, int32_t *families, address hosts,
+		       length stride, int32_t *ports, int32_t max,
+		       int32_t *count, int32_t *code) NAME("resolve-finish");
+int32_t resolve_finish(address handle, int32_t *families, address hosts,
+		       length stride, int32_t *ports, int32_t max,
+		       int32_t *count, int32_t *code)
+{
+	struct resolution *q = (struct resolution *)handle;
+	int32_t kind;
+	int done;
+
+	*count = 0;
+	*code = 0;
+	pthread_mutex_lock(&q->lock);
+	done = q->done;
+	pthread_mutex_unlock(&q->lock);
+	if (!done)
+		return WOULD_BLOCK;
+	kind = q->kind;
+	*code = q->code;
+	if (kind == 0)
+		kind = addresses(q->res, families, hosts, stride, ports, max,
+				 count, code);
+	free_resolution(q);
+	return kind;
+}
+
+/* AbandonResolve: frees the request now if its thread is done, or
+   leaves it for the thread to free when it is. */
+void resolve_abandon(address handle) NAME("resolve-abandon");
+void resolve_abandon(address handle)
+{
+	struct resolution *q = (struct resolution *)handle;
+	int done;
+
+	pthread_mutex_lock(&q->lock);
+	done = q->done;
+	q->abandoned = 1;
+	pthread_mutex_unlock(&q->lock);
+	if (done)
+		free_resolution(q);
 }
 
 static void set_port(struct sockaddr *sa, int port)

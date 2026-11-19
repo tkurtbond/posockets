@@ -25,9 +25,11 @@ MODULE Sockets; (* TCP and Unix-domain sockets for poc *)
    BeginWait and EndWait, for SocketTasks. Phase 5: SetDeadline, and
    Now, and TimeLeft and TimedOut for SocketTasks. Phase 6: ListenUnix
    and ConnectUnix. Phase 10: Await and ConnectWithin, deadlines without
-   tasks. *)
+   tasks. Phase 11: Resolution, StartResolve, FinishResolve,
+   AbandonResolve and ResolveWithin, names looked up in a thread of the
+   C part while the program goes on. *)
 
-IMPORT SYSTEM, Clocks;
+IMPORT SYSTEM, Clocks, GarbageCollectedHeap;
 
 CONST
   (* Address families, Socket.family and Address.family *)
@@ -57,6 +59,7 @@ CONST
   AssertListening* = 85;   (* Accept on a socket that isn't listening, or
                               I/O on one that is *)
   AssertWaiting* = 86;     (* Close while a SocketTasks call waits on it *)
+  AssertResolution* = 87;  (* a Resolution used once finished or abandoned *)
 
   (* Address.host's size: a Unix path is at most 108 bytes with its
      terminator (sun_path on Linux, 104 on the BSDs), and an IPv6 address
@@ -104,6 +107,17 @@ TYPE
     text-: ARRAY TextLen OF CHAR
   END;
 
+  (* A lookup started by StartResolve, in a thread of the C part for a
+     name (PLAN.md, Phase 11). fd is the descriptor that becomes
+     readable when it is done, or -1 if it was done at once (a numeric
+     or empty host). FinishResolve or AbandonResolve frees it. *)
+  Resolution* = POINTER TO ResolutionDesc;
+  ResolutionDesc* = RECORD
+    fd-: LONGINT;
+    h: SYSTEM.ADDRESS;     (* the C part's request; 0 once freed *)
+    what-: ARRAY 512 OF CHAR (* "resolve <host> port <port>", for errors *)
+  END;
+
 VAR
   (* errno values a caller may act on, as Error.code of a system error.
      Their numbers differ between systems, so they come from the C part. *)
@@ -128,6 +142,14 @@ PROCEDURE ["C", "Sockets.-resolve"] CResolve(host: ARRAY OF CHAR;
   VAR families: ARRAY OF SYSTEM.INT32; VAR hosts: ARRAY OF CHAR;
   stride: SYSTEM.INT64; VAR ports: ARRAY OF SYSTEM.INT32;
   max: SYSTEM.INT32; VAR count, code: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-resolve-start"] CResolveStart(host: ARRAY OF CHAR;
+  hostLen: SYSTEM.INT64; port: SYSTEM.INT32; VAR h: SYSTEM.ADDRESS;
+  VAR fd: SYSTEM.INT64): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-resolve-finish"] CResolveFinish(h: SYSTEM.ADDRESS;
+  VAR families: ARRAY OF SYSTEM.INT32; VAR hosts: ARRAY OF CHAR;
+  stride: SYSTEM.INT64; VAR ports: ARRAY OF SYSTEM.INT32;
+  max: SYSTEM.INT32; VAR count, code: SYSTEM.INT32): SYSTEM.INT32;
+PROCEDURE ["C", "Sockets.-resolve-abandon"] CResolveAbandon(h: SYSTEM.ADDRESS);
 PROCEDURE ["C", "Sockets.-listen"] CListen(host: ARRAY OF CHAR;
   hostLen: SYSTEM.INT64; port, backlog, nonBlocking: SYSTEM.INT32;
   VAR fds: ARRAY OF SYSTEM.INT64; VAR families: ARRAY OF SYSTEM.INT32;
@@ -215,6 +237,38 @@ BEGIN
   err.kind := kind; err.want := 0; err.code := code;
   CErrorText(kind, code, what, LEN(what), err.text, LEN(err.text))
 END SetError;
+
+(* "resolve <host> port <port>", a lookup's error text. *)
+PROCEDURE ResolveWhat(host: ARRAY OF CHAR; port: INTEGER;
+    VAR what: ARRAY OF CHAR);
+BEGIN
+  what[0] := 0X; Append(what, "resolve "); Append(what, host);
+  Append(what, " port "); AppendInt(what, port)
+END ResolveWhat;
+
+(* A lookup's result from the C part, kind and code, as addrs[0..n-1]
+   from its arrays, or err. Halts (AssertArgument) if addrs was too
+   small for count. *)
+PROCEDURE Resolved(kind, code: SYSTEM.INT32; what: ARRAY OF CHAR;
+    VAR families: ARRAY OF SYSTEM.INT32; VAR hosts: ARRAY OF CHAR;
+    VAR ports: ARRAY OF SYSTEM.INT32; count: SYSTEM.INT32;
+    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
+  VAR i, j: LONGINT;
+BEGIN
+  n := 0;
+  IF kind # 0 THEN SetError(err, kind, code, what); RETURN FALSE END;
+  ASSERT(count <= LEN(addrs), AssertArgument);
+  FOR i := 0 TO count - 1 DO
+    addrs[i].family := families[i]; addrs[i].port := ports[i];
+    j := 0;
+    WHILE (j < HostLen - 1) & (hosts[i * HostLen + j] # 0X) DO
+      addrs[i].host[j] := hosts[i * HostLen + j]; INC(j)
+    END;
+    addrs[i].host[j] := 0X
+  END;
+  n := count;
+  RETURN TRUE
+END Resolved;
 
 (* Sockets *)
 
@@ -342,9 +396,7 @@ PROCEDURE Resolve*(host: ARRAY OF CHAR; port: INTEGER;
     families, ports: POINTER TO ARRAY OF SYSTEM.INT32;
     hosts: POINTER TO ARRAY OF CHAR;
     count, code, kind: SYSTEM.INT32;
-    i, j: LONGINT;
     what: ARRAY 512 OF CHAR;
-    ok: BOOLEAN;
 BEGIN
   CheckPort(port);
   ClearError(err); n := 0;
@@ -352,24 +404,85 @@ BEGIN
   NEW(hosts, LEN(addrs) * HostLen);
   kind := CResolve(host, LEN(host), port, 0, families^, hosts^, HostLen,
     ports^, SHORT(LEN(addrs)), count, code);
-  IF kind # 0 THEN
-    what := "resolve "; Append(what, host); Append(what, " port ");
-    AppendInt(what, port);
-    SetError(err, kind, code, what); ok := FALSE
-  ELSE
-    ASSERT(count <= LEN(addrs), AssertArgument);
-    FOR i := 0 TO count - 1 DO
-      addrs[i].family := families[i]; addrs[i].port := ports[i];
-      j := 0;
-      WHILE (j < HostLen - 1) & (hosts[i * HostLen + j] # 0X) DO
-        addrs[i].host[j] := hosts[i * HostLen + j]; INC(j)
-      END;
-      addrs[i].host[j] := 0X
-    END;
-    n := count; ok := TRUE
-  END;
-  RETURN ok
+  ResolveWhat(host, port, what);
+  RETURN Resolved(kind, code, what, families^, hosts^, ports^, count,
+    addrs, n, err)
 END Resolve;
+
+PROCEDURE ^ FinalizeResolution(obj: SYSTEM.PTR);
+
+(* What StartResolve gives r to wait on and free, and its error text. *)
+PROCEDURE NewResolution(h: SYSTEM.ADDRESS; fd: LONGINT;
+    what: ARRAY OF CHAR): Resolution;
+  VAR r: Resolution;
+BEGIN
+  NEW(r); r.h := h; r.fd := fd; COPY(what, r.what);
+  GarbageCollectedHeap.RegisterFinalizer(r, FinalizeResolution);
+  RETURN r
+END NewResolution;
+
+(* Starts looking up host's TCP addresses for port, as Resolve does,
+   into r, without waiting for the answer: a name is looked up by
+   getaddrinfo in a thread of the C part, which touches no Oberon memory,
+   while the program goes on, and r.fd becomes readable when it is done.
+   A numeric or empty host is looked up at once, with no thread, and
+   r.fd is -1. Then FinishResolve gives the addresses, or
+   AbandonResolve gives them up; a finalizer abandons a Resolution
+   that is neither, as a backstop. FALSE, with a system error, only if
+   no pipe or thread could be had (EMFILE, EAGAIN); a name that doesn't
+   resolve is FinishResolve's error. Halts (AssertArgument) for a port
+   outside 0..65535. *)
+PROCEDURE StartResolve*(host: ARRAY OF CHAR; port: INTEGER;
+    VAR r: Resolution; VAR err: Error): BOOLEAN;
+  VAR h: SYSTEM.ADDRESS; fd: SYSTEM.INT64; e: SYSTEM.INT32;
+    what: ARRAY 512 OF CHAR;
+BEGIN
+  CheckPort(port);
+  ClearError(err); r := NIL;
+  ResolveWhat(host, port, what);
+  e := CResolveStart(host, LEN(host), port, h, fd);
+  IF e # 0 THEN SetError(err, system, e, what); RETURN FALSE END;
+  r := NewResolution(h, SYSTEM.VAL(LONGINT, fd), what);
+  RETURN TRUE
+END StartResolve;
+
+(* r's addresses into addrs[0..n-1], or its error, as Resolve gives
+   them, once r is done (r.fd readable, or -1), freeing r; before then
+   FALSE with wouldBlock (want wantRead), keeping it. Halts
+   (AssertResolution) for an r already finished or abandoned,
+   (AssertArgument) if addrs can't hold every address (r is freed
+   first). *)
+PROCEDURE FinishResolve*(r: Resolution; VAR addrs: ARRAY OF Address;
+    VAR n: INTEGER; VAR err: Error): BOOLEAN;
+  VAR
+    families, ports: POINTER TO ARRAY OF SYSTEM.INT32;
+    hosts: POINTER TO ARRAY OF CHAR;
+    count, code, kind: SYSTEM.INT32;
+BEGIN
+  ASSERT(r.h # 0, AssertResolution);
+  ClearError(err); n := 0;
+  NEW(families, LEN(addrs)); NEW(ports, LEN(addrs));
+  NEW(hosts, LEN(addrs) * HostLen);
+  kind := CResolveFinish(r.h, families^, hosts^, HostLen, ports^,
+    SHORT(LEN(addrs)), count, code);
+  IF kind = WouldBlock THEN SetWouldBlock(err, wantRead); RETURN FALSE END;
+  r.h := 0; r.fd := -1;
+  RETURN Resolved(kind, code, r.what, families^, hosts^, ports^, count,
+    addrs, n, err)
+END FinishResolve;
+
+(* Gives up r: frees it now if its lookup is done, or has its thread
+   free it when it is (it can't be stopped sooner). r.fd is closed then,
+   or later, and is -1 here at once. Does nothing for an r already
+   finished or abandoned. *)
+PROCEDURE AbandonResolve*(r: Resolution);
+BEGIN
+  IF r.h # 0 THEN CResolveAbandon(r.h); r.h := 0; r.fd := -1 END
+END AbandonResolve;
+
+PROCEDURE FinalizeResolution(obj: SYSTEM.PTR);
+BEGIN AbandonResolve(SYSTEM.VAL(Resolution, obj))
+END FinalizeResolution;
 
 (* Listening and connecting (TCP) *)
 
@@ -750,11 +863,48 @@ BEGIN
   RETURN TRUE
 END SetNonBlocking;
 
+(* host's TCP addresses for port, as Resolve gives them, waiting in the
+   kernel at most ms milliseconds (0: no limit) for a name's lookup
+   (StartResolve), which goes on in its thread after a timeout, and is
+   freed when done: then FALSE with timedOut, "resolve <host> port
+   <port>: timed out". It stops every task while it waits, as Resolve
+   does, but no longer than ms. Halts (AssertArgument) for a port
+   outside 0..65535, a negative ms, or if addrs can't hold every
+   address. *)
+PROCEDURE ResolveWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
+    VAR addrs: ARRAY OF Address; VAR n: INTEGER; VAR err: Error): BOOLEAN;
+  VAR r: Resolution; end, left: LONGINT; e: SYSTEM.INT32;
+BEGIN
+  ASSERT(ms >= 0, AssertArgument);
+  n := 0;
+  IF ~StartResolve(host, port, r, err) THEN RETURN FALSE END;
+  end := Now() + ms;
+  WHILE r.fd # -1 DO
+    IF ms = 0 THEN left := -1
+    ELSE left := end - Now(); IF left < 0 THEN left := 0 END
+    END;
+    e := CAwait(r.fd, wantRead, left);
+    IF e = 0 THEN
+      IF FinishResolve(r, addrs, n, err) THEN RETURN TRUE
+      ELSIF err.kind # wouldBlock THEN RETURN FALSE
+      END
+    ELSIF e = TimedOutMark THEN
+      (* poll counts in whole ms, and may wake a little early by Now. *)
+      IF end - Now() <= 0 THEN
+        AbandonResolve(r); TimedOut(NIL, err, r.what); RETURN FALSE
+      END
+    ELSIF e # EINTR THEN
+      AbandonResolve(r); SetError(err, system, e, "poll"); RETURN FALSE
+    END
+  END;
+  RETURN FinishResolve(r, addrs, n, err)
+END ResolveWithin;
+
 (* A connection to host and port, as SocketTasks.Connect makes it but
    without tasks: each of host's addresses in getaddrinfo's order until
    one connects, reporting the last error, in at most ms milliseconds
-   for them all (0: no limit), waiting in the kernel (Await). Resolving
-   the name isn't counted in ms. s is non-blocking if nonBlocking, else
+   for them all, the lookup included (ResolveWithin; 0: no limit),
+   waiting in the kernel (Await). s is non-blocking if nonBlocking, else
    blocking; on failure it is NIL, on success it has no deadline. Halts
    (AssertArgument) for a port outside 0..65535 or a negative ms. *)
 PROCEDURE ConnectWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
@@ -764,8 +914,8 @@ PROCEDURE ConnectWithin*(host: ARRAY OF CHAR; port: INTEGER; ms: LONGINT;
 BEGIN
   ASSERT(ms >= 0, AssertArgument);
   s := NIL;
-  IF ~Resolve(host, port, addrs, n, err) THEN RETURN FALSE END;
   end := Now() + ms; left := 0; ok := FALSE;
+  IF ~ResolveWithin(host, port, ms, addrs, n, err) THEN RETURN FALSE END;
   i := 0;
   WHILE ~ok & (i < n) DO
     IF ms > 0 THEN

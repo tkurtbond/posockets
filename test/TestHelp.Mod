@@ -14,6 +14,8 @@ PROCEDURE ["C", "TestHelp.-open-fds"] COpenFds(): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-open-null"] COpenNull(): SYSTEM.INT64;
 PROCEDURE ["C", "TestHelp.-close"] CClose(fd: SYSTEM.INT64): SYSTEM.INT32;
 PROCEDURE ["C", "TestHelp.-unix-path-max"] CUnixPathMax(): SYSTEM.INT32;
+(* in Sockets.c, the library's C part, for the tests alone *)
+PROCEDURE ["C", "Sockets.-set-resolve-delay"] CSetResolveDelay(ms: SYSTEM.INT32);
 
 (* Whether fd becomes readable within ms milliseconds: a listener has a
    connection queued, so Accept won't wait. *)
@@ -93,5 +95,13 @@ PROCEDURE Close*(fd: LONGINT);
 BEGIN
   r := CClose(fd)
 END Close;
+
+(* Makes every name lookup started from now on (Sockets.StartResolve)
+   wait ms milliseconds in its thread before getaddrinfo, so that a
+   lookup is slow enough to time out with no name server; 0 for none. *)
+PROCEDURE SetResolveDelay*(ms: INTEGER);
+BEGIN
+  CSetResolveDelay(ms)
+END SetResolveDelay;
 
 END TestHelp.
